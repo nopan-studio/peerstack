@@ -164,9 +164,13 @@ export default function (pi: ExtensionAPI) {
 	// ━━ SSE parser ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 	function sseParser(onEvent: (event: string, data: any) => void) {
 		const dec = new TextDecoder("utf-8"); let buf = "";
+		let chunkCount = 0;
 		return {
 			feed(chunk: Uint8Array) {
-				buf += dec.decode(chunk, { stream: true });
+				chunkCount++;
+				const decoded = dec.decode(chunk, { stream: true });
+				console.error(`[peerstack:${identity?.name}] SSE received chunk #${chunkCount}, ${chunk.length} bytes`);
+				buf += decoded;
 				let idx; while ((idx = buf.indexOf("\n\n")) >= 0) {
 					const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
 					let event = "message"; const lines: string[] = [];
@@ -175,7 +179,7 @@ export default function (pi: ExtensionAPI) {
 						if (line.startsWith("event:")) event = line.slice(6).trimStart();
 						else if (line.startsWith("data:")) { let v = line.slice(5); if (v.startsWith(" ")) v = v.slice(1); lines.push(v); }
 					}
-					if (lines.length > 0) { const d = lines.join("\n"); let data: any = d; try { data = JSON.parse(d); } catch { /* string */ } try { onEvent(event, data); } catch { /* ignore */ } }
+					if (lines.length > 0) { const d = lines.join("\n"); let data: any = d; try { data = JSON.parse(d); } catch { /* string */ } console.error(`[peerstack:${identity?.name}] Parsed SSE: event=${event}, data=`, JSON.stringify(data).slice(0, 100)); try { onEvent(event, data); } catch (e) { console.error(`[peerstack:${identity?.name}] onEvent error:`, e); } }
 				}
 			},
 		};
@@ -253,21 +257,25 @@ export default function (pi: ExtensionAPI) {
 		if (sseAbort) try { sseAbort.abort(); } catch { /* ignore */ }
 		const ac = new AbortController(); sseAbort = ac;
 		const url = serverUrl + `/v1/events?session_id=${encodeURIComponent(identity.session_id)}`;
+		console.error(`[peerstack:${identity?.name}] Opening SSE connection to ${url}`);
 		let resp: Response;
-		try { resp = await fetch(url, { method: "GET", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "text/event-stream" }, signal: ac.signal }); } catch {
+		try { resp = await fetch(url, { method: "GET", headers: { "Authorization": `Bearer ${authToken}`, "Accept": "text/event-stream" }, signal: ac.signal }); } catch (e) {
+			console.error(`[peerstack:${identity?.name}] SSE fetch failed:`, e);
 			if (connected) {
 				connected = false;
-				if (currentCtx?.hasUI) try { currentCtx.ui.notify("📡 peerstack: disconnected — reconnecting...", "warning"); } catch { /* ignore */ }
+				if (currentCtx?.hasUI) try { currentCtx.ui.notify(" peerstack: disconnected — reconnecting...", "warning"); } catch { /* ignore */ }
 			}
 			scheduleReconnect(); return;
 		}
 		if (!resp.ok || !resp.body) {
+			console.error(`[peerstack:${identity?.name}] SSE response not ok: ${resp.status}`);
 			if (connected) {
 				connected = false;
 				if (currentCtx?.hasUI) try { currentCtx.ui.notify("📡 peerstack: disconnected — reconnecting...", "warning"); } catch { /* ignore */ }
 			}
 			scheduleReconnect(); return;
 		}
+		console.error(`[peerstack:${identity?.name}] SSE connection established, status=${resp.status}`);
 		if (!connected) {
 			connected = true;
 			if (currentCtx?.hasUI) try { currentCtx.ui.notify("📡 peerstack: connected", "success"); } catch { /* ignore */ }
@@ -289,32 +297,18 @@ export default function (pi: ExtensionAPI) {
 					};
 					inboundQueue.set(msg_id, inbound);
 					currentInbound = inbound;
-					console.error(`[peerstack:${identity?.name}] Queuing inbound message, queue size: ${inboundMessageQueue.length}`);
-					// Queue async turn trigger — uses sendUserMessage which reliably triggers a turn
-					inboundMessageQueue.push(async () => {
-						console.error(`[peerstack:${identity?.name}] Processing inbound message from ${senderName}`);
-						try {
-							// First try sendUserMessage (most reliable for triggering turns)
-							await Promise.resolve(pi.sendUserMessage(`>>> 📨 MESSAGE FROM ${senderName.toUpperCase()} <<<\n\n${promptText}\n\n(Your response will be automatically sent back to ${senderName}.)`));
-							console.error(`[peerstack:${identity?.name}] sendUserMessage succeeded`);
-						} catch (e) {
-							console.error(`[peerstack:${identity?.name}] sendUserMessage failed:`, e);
-							// Fallback: use sendMessage with triggerTurn
+					console.error(`[peerstack:${identity?.name}] Queued inbound, scheduling turn trigger`);
+					// Defer turn trigger to avoid blocking SSE reader
+					setImmediate(() => {
+						console.error(`[peerstack:${identity?.name}] Triggering turn for inbound message`);
+						void (async () => {
 							try {
-								await Promise.resolve(pi.sendMessage({
-									customType: "peerstack-inbound",
-									content: `[inbound from ${senderName}]\n\n${promptText}`,
-									display: true,
-									details: { msg_id, sender_session: sender.session_id },
-								}, { deliverAs: "followUp", triggerTurn: true }));
-								console.error(`[peerstack:${identity?.name}] sendMessage fallback succeeded`);
-							} catch (e2) {
-								console.error(`[peerstack:${identity?.name}] sendMessage fallback failed:`, e2);
-								/* agent may be mid-turn or API unavailable */
+								await pi.sendUserMessage(`>>> 📨 MESSAGE FROM ${senderName.toUpperCase()} <<<\n\n${promptText}\n\n(Your response will be automatically sent back to ${senderName}.)`);
+							} catch (e) {
+								console.error(`[peerstack:${identity?.name}] sendUserMessage failed:`, e);
 							}
-						}
+						})();
 					});
-					void processInboundQueue();
 					break;
 				}
 				case "response": {
@@ -333,7 +327,22 @@ export default function (pi: ExtensionAPI) {
 			}
 		});
 		const reader = resp.body.getReader();
-		try { while (true) { const { done, value } = await reader.read(); if (done) break; if (value) parser.feed(value); } } catch { /* sse read error */ }
+		try {
+			console.error(`[peerstack:${identity?.name}] Starting SSE reader loop`);
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) {
+					console.error(`[peerstack:${identity?.name}] SSE stream ended`);
+					break;
+				}
+				if (value) {
+					console.error(`[peerstack:${identity?.name}] Reader got ${value.length} bytes`);
+					parser.feed(value);
+				}
+			}
+		} catch (e) {
+			console.error(`[peerstack:${identity?.name}] SSE reader error:`, e);
+		}
 		finally { try { reader.releaseLock(); } catch { /* ignore */ } }
 		// Connection dropped
 		if (connected) {

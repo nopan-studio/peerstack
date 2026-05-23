@@ -134,7 +134,22 @@ function broadcast(event: string, data: unknown, excludeSession?: string): void 
 }
 
 function sendTo(sessionId: string, event: string, data: unknown): void {
-	const w = streams.get(sessionId); if (!w) return; const id = ++w.lastId; try { w.enqueue(sse(event, data, id)); } catch { /* dead */ }
+	const w = streams.get(sessionId);
+	console.log(`[hub] sendTo called: sessionId=${sessionId.slice(-6)}, event=${event}`);
+	console.log(`[hub] sendTo: streams map has ${streams.size} entries, keys: ${[...streams.keys()].map(s => s.slice(-6)).join(", ")}`);
+	if (!w) {
+		console.log(`[hub] sendTo FAILED: No stream for ${sessionId}`);
+		return;
+	}
+	const id = ++w.lastId;
+	try {
+		const sseData = sse(event, data, id);
+		console.log(`[hub] sendTo: enqueueing id=${id}, data length=${sseData.length}`);
+		w.enqueue(sseData);
+		console.log(`[hub] Sent ${event} to ${sessionId.slice(-6)}, id=${id}`);
+	} catch (e) {
+		console.log(`[hub] sendTo enqueue failed:`, e);
+	}
 }
 
 function nowIso(): string { return new Date().toISOString(); }
@@ -331,6 +346,7 @@ async function handleRegister(req: Request): Promise<Response> {
 	};
 	agents.set(session_id, card);
 	updateNameIndex(name, session_id);
+	console.log(`[hub] Agent registered: ${name}#${session_id.slice(-6)}, streams map size: ${streams.size}`);
 	broadcast("agent_joined", { agent: card }, session_id);
 	lastBuiltKey = ""; // force redraw
 	return json({ ok: true, agent: card, sse_url: `/v1/events?session_id=${encodeURIComponent(session_id)}` });
@@ -343,27 +359,54 @@ function handleEvents(req: Request, url: URL): Response {
 	if (!entry) return json({ ok: false, error: "agent not found" }, 404);
 
 	const enc = new TextEncoder();
-	let writer: SseWriter = { lastId: 0, enqueue(s: string) { try { controller.enqueue(enc.encode(s)); } catch { /* closed */ } }, close() { /* noop */ } };
+	
+	// Create the ReadableStream controller first
+	const controller = new ReadableStream<Uint8Array>({
+		start(c) {
+			try { c.enqueue(enc.encode(sse("hello", { server_time: nowIso() }, 1))); } catch { /* noop */ }
+			const agentsList = [...agents.values()].filter(a => a.session_id !== session_id && !a.explicit);
+			try { c.enqueue(enc.encode(sse("pool_snapshot", { agents: agentsList }, 2))); } catch { /* noop */ }
+			
+			// Send periodic keepalive to prevent timeout
+			const keepaliveInterval = setInterval(() => {
+				try { c.enqueue(enc.encode(": keepalive\n\n")); } catch { clearInterval(keepaliveInterval); }
+			}, SSE_KEEPALIVE_MS);
+			
+			// Store interval for cleanup
+			(c as any)._keepalive = keepaliveInterval;
+		},
+		cancel() {
+			const cur = streams.get(session_id); if (cur === writer) streams.delete(session_id);
+			// Clear keepalive
+			if ((this as any)._keepalive) clearInterval((this as any)._keepalive);
+		},
+	});
+
+	// Now create the writer that references the controller
+	let writer: SseWriter = { lastId: 2, enqueue(s: string) { try { controller.enqueue(enc.encode(s)); } catch { /* closed */ } }, close() { /* noop */ } };
 
 	const old = streams.get(session_id); if (old && old !== writer) { try { old.close(); } catch { /* noop */ } }
 	streams.set(session_id, writer);
 
-	const controller = new ReadableStream<Uint8Array>({
-		start(c) {
-			try { c.enqueue(enc.encode(sse("hello", { server_time: nowIso() }, ++writer.lastId))); } catch { /* noop */ }
-			const agentsList = [...agents.values()].filter(a => a.session_id !== session_id && !a.explicit);
-			try { c.enqueue(enc.encode(sse("pool_snapshot", { agents: agentsList }, ++writer.lastId))); } catch { /* noop */ }
-		},
-		cancel() { const cur = streams.get(session_id); if (cur === writer) streams.delete(session_id); },
-	});
+	console.log(`[hub] SSE stream opened for ${entry.name}#${session_id.slice(-6)}, total streams: ${streams.size}`);
 
 	req.signal.addEventListener("abort", () => {
+		console.log(`[hub] SSE stream closed for ${entry.name}#${session_id.slice(-6)}`);
 		const cur = streams.get(session_id); if (cur === writer) streams.delete(session_id);
 		const left = agents.get(session_id); if (left) broadcast("agent_left", { session_id, name: left.name }, session_id);
 	});
 
 	return new Response(controller, {
-		status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" },
+		status: 200,
+		headers: {
+			"content-type": "text/event-stream; charset=utf-8",
+			"cache-control": "no-cache, no-store, must-revalidate",
+			"pragma": "no-cache",
+			"expires": "0",
+			"connection": "keep-alive",
+			"x-accel-buffering": "no",
+			"access-control-allow-origin": "*",
+		},
 	});
 }
 
@@ -402,6 +445,12 @@ async function handleSendMessage(req: Request): Promise<Response> {
 	const target = resolveTarget(body.target);
 	if (!target) return json({ ok: false, error: `target "${body.target}" not found` }, 404);
 
+	console.log(`[hub] handleSendMessage: sender=${sender.name}#${sender.session_id.slice(-6)}, target=${target.name}#${target.session_id.slice(-6)}`);
+	console.log(`[hub] handleSendMessage: streams map has ${streams.size} entries`);
+	for (const [sid, w] of streams) {
+		console.log(`[hub]   stream: ${sid.slice(-6)} (lastId=${w.lastId})`);
+	}
+
 	const hops = typeof body.hops === "number" ? body.hops : 0;
 	if (hops >= MAX_HOPS) return json({ ok: false, error: "hop limit exceeded" }, 409);
 
@@ -419,6 +468,7 @@ async function handleSendMessage(req: Request): Promise<Response> {
 	conversationTracker.set(msg_id, { from: sender.name, to: target.name, preview: body.prompt, time: now });
 
 	const targetStream = streams.get(target.session_id);
+	console.log(`[hub] handleSendMessage: targetStream found=${!!targetStream}, target.session_id=${target.session_id.slice(-6)}`);
 	if (targetStream) {
 		console.log(`[hub] Sending prompt to ${target.name}#${target.session_id.slice(-6)}, stream exists: ${!!targetStream}`);
 		sendTo(target.session_id, "prompt", {
