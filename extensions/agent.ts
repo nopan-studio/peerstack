@@ -38,13 +38,15 @@ const MESSAGE_TIMEOUT_MS = 1_800_000;
 
 interface AgentCard {
 	session_id: string; name: string; model: string;
-	color: string; status: string;
-	context_used_pct: number; queue_depth: number;
+	color: string; status: string; availability: string;
+	description: string; skills: string[]; current_task: string;
+	groups: string[]; context_used_pct: number; queue_depth: number;
 }
 
 interface InboundContext {
 	msg_id: string; hops: number; sender_session: string;
 	sender_name: string; sender_cwd: string; prompt_text: string; fulfilled: boolean;
+	reply_to?: string; thread_id?: string;
 }
 
 interface PendingReply {
@@ -127,15 +129,14 @@ export default function (pi: ExtensionAPI) {
 	let shuttingDown = false;
 	let connected = false;
 
-	// Inbound message queue — processes incoming prompts and triggers agent turns
-	const inboundMessageQueue: (() => Promise<void>)[] = [];
-
-	async function processInboundQueue(): Promise<void> {
-		if (inboundMessageQueue.length === 0) return;
-		const task = inboundMessageQueue.shift();
-		if (task) await task();
-		if (inboundMessageQueue.length > 0) await processInboundQueue();
-	}
+	// Agent profile — settable via hub_status tool or heartbeat
+	let agentProfile = {
+		description: "",
+		skills: [] as string[],
+		current_task: "",
+		availability: "online" as string,
+		groups: [] as string[],
+	};
 
 	// Pool state — shared across SSE events and refresh timer
 	let poolAgents: AgentCard[] = [];
@@ -164,12 +165,9 @@ export default function (pi: ExtensionAPI) {
 	// ━━ SSE parser ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 	function sseParser(onEvent: (event: string, data: any) => void) {
 		const dec = new TextDecoder("utf-8"); let buf = "";
-		let chunkCount = 0;
 		return {
 			feed(chunk: Uint8Array) {
-				chunkCount++;
 				const decoded = dec.decode(chunk, { stream: true });
-				console.error(`[peerstack:${identity?.name}] SSE received chunk #${chunkCount}, ${chunk.length} bytes`);
 				buf += decoded;
 				let idx; while ((idx = buf.indexOf("\n\n")) >= 0) {
 					const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
@@ -179,7 +177,7 @@ export default function (pi: ExtensionAPI) {
 						if (line.startsWith("event:")) event = line.slice(6).trimStart();
 						else if (line.startsWith("data:")) { let v = line.slice(5); if (v.startsWith(" ")) v = v.slice(1); lines.push(v); }
 					}
-					if (lines.length > 0) { const d = lines.join("\n"); let data: any = d; try { data = JSON.parse(d); } catch { /* string */ } console.error(`[peerstack:${identity?.name}] Parsed SSE: event=${event}, data=`, JSON.stringify(data).slice(0, 100)); try { onEvent(event, data); } catch (e) { console.error(`[peerstack:${identity?.name}] onEvent error:`, e); } }
+					if (lines.length > 0) { const d = lines.join("\n"); let data: any = d; try { data = JSON.parse(d); } catch { /* string */ } try { onEvent(event, data); } catch (e) { console.error(`[peerstack:${identity?.name}] onEvent error:`, e); } }
 				}
 			},
 		};
@@ -208,9 +206,8 @@ export default function (pi: ExtensionAPI) {
 	async function refreshPoolDisplay(ctx: ExtensionContext): Promise<void> {
 		if (!ctx.hasUI) return;
 		const agents = await fetchAllAgents();
-		// Check if anything actually changed
-		const key = agents.map(a => `${a.session_id}|${a.name}|${a.model}|${a.status}|${a.context_used_pct}|${a.queue_depth}`).sort().join(",");
-		const prevKey = poolAgents.map(a => `${a.session_id}|${a.name}|${a.model}|${a.status}|${a.context_used_pct}|${a.queue_depth}`).sort().join(",");
+		const key = agents.map(a => `${a.session_id}|${a.name}|${a.model}|${a.status}|${a.availability}|${a.context_used_pct}|${a.queue_depth}|${(a.groups||[]).join(',')}`).sort().join(",");
+		const prevKey = poolAgents.map(a => `${a.session_id}|${a.name}|${a.model}|${a.status}|${a.availability}|${a.context_used_pct}|${a.queue_depth}|${(a.groups||[]).join(',')}`).sort().join(",");
 		if (key === prevKey) return;
 		poolAgents = agents;
 		renderPoolWidget(ctx);
@@ -228,12 +225,15 @@ export default function (pi: ExtensionAPI) {
 					const dot = a.status === "online"
 						? hexFg(a.color, "●")
 						: a.status === "stale" ? theme.fg("warning", "~") : theme.fg("error", "✗");
+					const avail = a.availability === "busy" ? theme.fg("warning", "⚡")
+						: a.availability === "away" ? theme.fg("dim", "💤") : "";
 					const filled = Math.max(0, Math.min(8, Math.round((a.context_used_pct / 100) * 8)));
 					const bar = theme.fg("success", "#".repeat(filled)) + theme.fg("dim", "-".repeat(8 - filled));
 					const pct = theme.fg("accent", `${String(Math.round(a.context_used_pct)).padStart(3)}%`);
 					const busy = a.queue_depth > 0 && a.status === "online" ? theme.fg("warning", " ⚡") : "";
 					const selfTag = isSelf(a) ? theme.fg("warning", " (you)") : "";
-					const line = ` ${dot} ${theme.fg("accent", a.name)}${theme.fg("dim", "#" + shortId(a.session_id))}${selfTag} ${theme.fg("dim", abbreviateModel(a.model).padEnd(12))} [${bar}] ${pct}${busy}`;
+					const groups = a.groups && a.groups.length > 0 ? theme.fg("dim", " " + a.groups.join(" ")) : "";
+					const line = ` ${dot} ${theme.fg("accent", a.name)}${theme.fg("dim", "#" + shortId(a.session_id))}${selfTag} ${avail} ${theme.fg("dim", abbreviateModel(a.model).padEnd(12))} [${bar}] ${pct}${busy}${groups}`;
 					out.push(truncateToWidth(line, width));
 				}
 				return out;
@@ -252,7 +252,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ━━ SSE lifecycle ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-	async function openSse(): Promise<void> {
+	async function openSse(onReady?: () => void): Promise<void> {
 		if (!identity || !serverUrl || !authToken) return;
 		if (sseAbort) try { sseAbort.abort(); } catch { /* ignore */ }
 		const ac = new AbortController(); sseAbort = ac;
@@ -281,29 +281,33 @@ export default function (pi: ExtensionAPI) {
 			if (currentCtx?.hasUI) try { currentCtx.ui.notify("📡 peerstack: connected", "success"); } catch { /* ignore */ }
 		}
 		reconnectAttempts = 0;
+		let readyFired = false;
 		const parser = sseParser((event, data) => {
-			console.error(`[peerstack:${identity?.name}] SSE event:`, event, data?.msg_id ? `msg_id=${data.msg_id}` : '');
+			if (!readyFired && (event === "hello" || event === "pool_snapshot")) {
+				readyFired = true;
+				onReady?.();
+			}
 			switch (event) {
 				case "prompt": {
-					console.error(`[peerstack:${identity?.name}] Received prompt from ${data?.sender?.name || 'unknown'}`);
 					const msg_id = data?.msg_id; if (!msg_id) return;
 					const sender = data.sender ?? {};
 					const senderName = sender.name || "unknown";
 					const promptText = data.prompt || "";
+					const threadInfo = data.thread_id ? ` [thread: ${data.thread_id}]` : "";
+					const replyInfo = data.reply_to ? ` (reply to: ${data.reply_to})` : "";
 					const inbound: InboundContext = {
 						msg_id, hops: typeof data.hops === "number" ? data.hops : 0,
 						sender_session: sender.session_id || "?", sender_name: senderName,
 						sender_cwd: sender.cwd || "?", prompt_text: promptText, fulfilled: false,
+						reply_to: data.reply_to, thread_id: data.thread_id,
 					};
 					inboundQueue.set(msg_id, inbound);
 					currentInbound = inbound;
-					console.error(`[peerstack:${identity?.name}] Queued inbound, scheduling turn trigger`);
 					// Defer turn trigger to avoid blocking SSE reader
 					setImmediate(() => {
-						console.error(`[peerstack:${identity?.name}] Triggering turn for inbound message`);
 						void (async () => {
 							try {
-								await pi.sendUserMessage(`>>> 📨 MESSAGE FROM ${senderName.toUpperCase()} <<<\n\n${promptText}\n\n(Your response will be automatically sent back to ${senderName}.)`);
+								await pi.sendUserMessage(`>>> MESSAGE FROM ${senderName.toUpperCase()}${threadInfo}${replyInfo} <<<\n\n${promptText}\n\n(Your response will be automatically sent back to ${senderName}.)`);
 							} catch (e) {
 								console.error(`[peerstack:${identity?.name}] sendUserMessage failed:`, e);
 							}
@@ -317,6 +321,14 @@ export default function (pi: ExtensionAPI) {
 					if (p) { p.result = { response: data.response, error: data.error ?? null }; try { p.resolve(p.result); } catch { /* ignore */ } }
 					break;
 				}
+				case "message_status": {
+					const msg_id = data?.msg_id; if (!msg_id) return;
+					if (data.status === "error" && data.error) {
+						const p = pendingReplies.get(msg_id);
+						if (p) { p.result = { error: data.error }; try { p.resolve(p.result); } catch { /* ignore */ } }
+					}
+					break;
+				}
 				case "pool_snapshot":
 				case "agent_joined":
 				case "agent_updated":
@@ -324,21 +336,25 @@ export default function (pi: ExtensionAPI) {
 				case "agent_stale":
 					if (currentCtx?.hasUI) { void refreshPoolDisplay(currentCtx); }
 					break;
+				case "presence_update": {
+					const agent = data?.agent;
+					if (agent && currentCtx?.hasUI) {
+						currentCtx.ui.notify(
+							`📡 ${agent.name} is now ${agent.availability}${agent.current_task ? ` (${agent.current_task})` : ""}`,
+							"info"
+						);
+					}
+					if (currentCtx?.hasUI) { void refreshPoolDisplay(currentCtx); }
+					break;
+				}
 			}
 		});
 		const reader = resp.body.getReader();
 		try {
-			console.error(`[peerstack:${identity?.name}] Starting SSE reader loop`);
 			while (true) {
 				const { done, value } = await reader.read();
-				if (done) {
-					console.error(`[peerstack:${identity?.name}] SSE stream ended`);
-					break;
-				}
-				if (value) {
-					console.error(`[peerstack:${identity?.name}] Reader got ${value.length} bytes`);
-					parser.feed(value);
-				}
+				if (done) break;
+				if (value) parser.feed(value);
 			}
 		} catch (e) {
 			console.error(`[peerstack:${identity?.name}] SSE reader error:`, e);
@@ -372,8 +388,15 @@ export default function (pi: ExtensionAPI) {
 		await api("POST", "/v1/agents/register", {
 			session_id: identity.session_id, name: identity.name,
 			model: ctx?.model?.id ?? identity.model, color: identity.color, cwd: identity.cwd,
+			description: agentProfile.description,
+			skills: agentProfile.skills,
+			current_task: agentProfile.current_task,
+			availability: agentProfile.availability,
+			groups: agentProfile.groups,
 		});
-		void openSse();
+		await new Promise<void>(resolve => {
+			void openSse(() => resolve());
+		});
 	}
 
 	// ━━ session_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -405,6 +428,11 @@ export default function (pi: ExtensionAPI) {
 			api("POST", `/v1/agents/${encodeURIComponent(identity.session_id)}/heartbeat`, {
 				context_used_pct: Math.round(ctxNow?.getContextUsage()?.percent ?? 0),
 				queue_depth: inboundQueue.size, model: ctxNow?.model?.id ?? identity.model,
+				description: agentProfile.description,
+				skills: agentProfile.skills,
+				current_task: agentProfile.current_task,
+				availability: agentProfile.availability,
+				groups: agentProfile.groups,
 			}, { timeoutMs: 5_000 }).catch(() => {});
 		}, HEARTBEAT_MS);
 		try { (heartbeatTimer as any).unref?.(); } catch { /* ignore */ }
@@ -412,9 +440,9 @@ export default function (pi: ExtensionAPI) {
 
 	// ━━ agent_end: auto-reply to inbound prompts ━━━━━━━━━━━━━━━━━━━━━━━━
 	pi.on("agent_end", async (_event, ctx) => {
-		const inbound = [...inboundQueue.values()].reverse().find(i => !i.fulfilled);
-		if (!inbound || !identity) return;
-		
+		const inbound = currentInbound;
+		if (!inbound || inbound.fulfilled || !identity) return;
+
 		// Capture the assistant's response text
 		let text = "";
 		for (const entry of ctx.sessionManager.getBranch()) {
@@ -424,22 +452,22 @@ export default function (pi: ExtensionAPI) {
 				else if (Array.isArray(m.content)) text = m.content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join("\n");
 			}
 		}
-		
-		// Only send response if we captured actual text
+
 		if (text.trim()) {
 			try {
-				await api("POST", `/v1/messages/${encodeURIComponent(inbound.msg_id)}/response`, {
+				const body: any = {
 					responder_session: identity.session_id,
 					response: text,
-				});
+				};
+				// If the inbound had thread info, echo it back
+				if (inbound.thread_id) body.thread_id = inbound.thread_id;
+				await api("POST", `/v1/messages/${encodeURIComponent(inbound.msg_id)}/response`, body);
 				inbound.fulfilled = true;
 				inboundQueue.delete(inbound.msg_id);
 				if (currentInbound?.msg_id === inbound.msg_id) currentInbound = null;
 			} catch {
 				// POST failed — keep inbound pending for retry on next turn
 			}
-		} else {
-			// No text captured — LLM may not have responded yet, keep pending
 		}
 	});
 
@@ -452,7 +480,7 @@ export default function (pi: ExtensionAPI) {
 		async execute() {
 			const agents = await fetchAllAgents();
 			return {
-				content: [{ type: "text" as const, text: agents.length === 0 ? "No agents on hub." : `Agents on hub (${agents.length}):\n${agents.map(a => `${a.status === "online" ? "●" : a.status === "stale" ? "~" : "✗"} ${a.name}#${shortId(a.session_id)}${isSelf(a) ? " (you)" : ""} (${abbreviateModel(a.model)}) ${Math.round(a.context_used_pct)}%`).join("\n")}` }],
+				content: [{ type: "text" as const, text: agents.length === 0 ? "No agents on hub." : `Agents on hub (${agents.length}):\n${agents.map(a => `${a.status === "online" ? "●" : a.status === "stale" ? "~" : "✗"} ${a.name}#${shortId(a.session_id)}${isSelf(a) ? " (you)" : ""} (${abbreviateModel(a.model)}) [${a.availability || "?"}] ${Math.round(a.context_used_pct)}%${a.groups?.length ? ` ${a.groups.join(' ')}` : ""}`).join("\n")}` }],
 				details: { agents },
 			};
 		},
@@ -461,28 +489,65 @@ export default function (pi: ExtensionAPI) {
 			const d = result.details as any; const agents: any[] = d?.agents ?? [];
 			const h = theme.fg("accent", `📡 ${agents.length} peer(s)`);
 			if (!options.expanded || agents.length === 0) return new Text(h, 0, 0);
-			return new Text(h + "\n" + agents.map((a: any) => `${a.status === "online" ? theme.fg("success", "●") : a.status === "stale" ? theme.fg("warning", "~") : theme.fg("error", "✗")} ${theme.fg("accent", a.name)}${theme.fg("dim", "#" + shortId(a.session_id))} ${theme.fg("dim", abbreviateModel(a.model))} ${theme.fg("warning", `${Math.round(a.context_used_pct)}%`)}`).join("\n"), 0, 0);
+			return new Text(h + "\n" + agents.map((a: any) => `${a.status === "online" ? theme.fg("success", "●") : a.status === "stale" ? theme.fg("warning", "~") : theme.fg("error", "✗")} ${theme.fg("accent", a.name)}${theme.fg("dim", "#" + shortId(a.session_id))} ${theme.fg("dim", abbreviateModel(a.model))} [${a.availability || "?"}] ${theme.fg("warning", `${Math.round(a.context_used_pct)}%`)}${a.groups?.length ? theme.fg("dim", ` ${a.groups.join(' ')}`) : ""}`).join("\n"), 0, 0);
 		},
 	});
 
 	pi.registerTool({
 		name: "hub_send", label: "Hub Send",
-		description: "Send a prompt to a peer agent. Returns a msg_id. Use hub_await (blocking) or hub_get (poll) to retrieve the reply.",
-		parameters: Type.Object({ target: Type.String({ description: "Peer agent name." }), prompt: Type.String({ description: "The prompt to send." }) }),
+		description: "Send a prompt to a peer agent or group. Supports broadcast to multiple targets, threaded replies, and priority. Returns a msg_id. Use hub_await (blocking) or hub_get (poll) to retrieve the reply.",
+		parameters: Type.Object({
+			target: Type.Optional(Type.String({ description: "Peer agent name. Use @group_name for group broadcast." })),
+			targets: Type.Optional(Type.Array(Type.String(), { description: "List of peer agent names or @group_names for multicast." })),
+			prompt: Type.String({ description: "The prompt to send." }),
+			reply_to: Type.Optional(Type.String({ description: "Message ID this is replying to." })),
+			thread_id: Type.Optional(Type.String({ description: "Thread ID for conversation grouping." })),
+			priority: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high"), Type.Literal("urgent")], { description: "Message priority. Default: normal." })),
+		}),
 		async execute(_callId, params) {
 			if (!identity) throw new Error("not connected to peerstack hub");
 			const hops = currentInbound ? currentInbound.hops + 1 : 0;
 			if (hops >= MAX_HOPS) throw new Error(`hop limit reached (${hops}/${MAX_HOPS})`);
-			// Strip #xxxx suffix if LLM picked it up from display tags
-			const cleanTarget = params.target.replace(/#[A-Za-z0-9]+$/, "");
-			const resp = await api("POST", "/v1/messages", { sender_session: identity.session_id, target: cleanTarget, prompt: params.prompt, hops });
+
+			// Build targets list
+			const targetsList: string[] = [];
+			if (typeof params.target === "string") targetsList.push(params.target);
+			if (Array.isArray(params.targets)) targetsList.push(...params.targets);
+			if (targetsList.length === 0) throw new Error("at least one target or targets required");
+
+			const body: any = {
+				sender_session: identity.session_id,
+				prompt: params.prompt,
+				hops,
+			};
+			if (targetsList.length === 1) {
+				body.target = targetsList[0].replace(/#[A-Za-z0-9]+$/, "");
+			} else {
+				body.targets = targetsList.map(t => t.replace(/#[A-Za-z0-9]+$/, ""));
+			}
+			if (params.reply_to) body.reply_to = params.reply_to;
+			if (params.thread_id) body.thread_id = params.thread_id;
+			if (params.priority) body.priority = params.priority;
+
+			const resp = await api("POST", "/v1/messages", body);
 			const msg_id = resp?.msg_id;
+			const is_broadcast = resp?.is_broadcast;
+
 			let resolveFn!: (v: { response?: any; error?: string | null }) => void;
 			const promise = new Promise<{ response?: any; error?: string | null }>(r => { resolveFn = r; });
 			pendingReplies.set(msg_id, { resolve: resolveFn, promise });
-			return { content: [{ type: "text" as const, text: `hub_send → ${params.target}\nmsg_id ${msg_id}\nhops ${hops}` }], details: { msg_id, target: params.target, hops } };
+
+			const targetDesc = is_broadcast ? `${resp.target_count} targets` : (targetsList[0] ?? "?");
+			return { content: [{ type: "text" as const, text: `hub_send → ${targetDesc}\nmsg_id ${msg_id}\nhops ${hops}${is_broadcast ? `\nbroadcast to ${resp.target_count} agents` : ""}` }], details: { msg_id, target: targetDesc, hops, is_broadcast, child_msg_ids: resp.child_msg_ids } };
 		},
-		renderCall(args, theme) { const t = (args as any).target ?? "?"; const p = (args as any).prompt ?? ""; const prev = p.length > 60 ? p.slice(0, 57) + "..." : p; return new Text(theme.fg("toolTitle", theme.bold("hub_send ")) + theme.fg("accent", t) + theme.fg("dim", " — ") + theme.fg("muted", prev), 0, 0); },
+		renderCall(args, theme) {
+			const t = (args as any).target ?? ((args as any).targets?.join?.(', ') ?? "?");
+			const p = (args as any).prompt ?? "";
+			const prev = p.length > 60 ? p.slice(0, 57) + "..." : p;
+			const prio = (args as any).priority;
+			const prioTag = prio && prio !== "normal" ? ` [${prio}]` : "";
+			return new Text(theme.fg("toolTitle", theme.bold("hub_send ")) + theme.fg("accent", t) + theme.fg("dim", prioTag + " — ") + theme.fg("muted", prev), 0, 0);
+		},
 		renderResult(result, _options, theme) { const d = result.details as any; return new Text(theme.fg("success", "→ ") + theme.fg("accent", d?.target) + theme.fg("dim", `  msg_id `) + theme.fg("warning", d?.msg_id), 0, 0); },
 	});
 
@@ -503,31 +568,139 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "hub_await", label: "Hub Await",
 		description: "Block until a reply to hub_send arrives or timeout (default 30 min).",
-		parameters: Type.Object({ msg_id: Type.String({ description: "msg_id from hub_send." }) }),
+		parameters: Type.Object({
+			msg_id: Type.String({ description: "msg_id from hub_send." }),
+			timeout_seconds: Type.Optional(Type.Number({ description: "Timeout in seconds. Default: 1800 (30 min)." })),
+		}),
 		async execute(_callId, params) {
 			const pending = pendingReplies.get(params.msg_id);
 			if (!pending) return { content: [{ type: "text" as const, text: "unknown msg_id" }], details: { error: "unknown_msg_id" } };
 			if (pending.result) { const r = pending.result; if (r.error) return { content: [{ type: "text" as const, text: `error: ${r.error}` }], details: { error: r.error } }; return { content: [{ type: "text" as const, text: typeof r.response === "string" ? r.response : JSON.stringify(r.response, null, 2) }], details: { response: r.response } }; }
-			const timeout = new Promise<{ error: string }>(r => { const t = setTimeout(() => r({ error: "timeout" }), MESSAGE_TIMEOUT_MS); try { (t as any).unref?.(); } catch { /* ignore */ } });
+			const timeoutSec = typeof params.timeout_seconds === "number" && params.timeout_seconds > 0 ? params.timeout_seconds * 1000 : MESSAGE_TIMEOUT_MS;
+			const timeout = new Promise<{ error: string }>(r => { const t = setTimeout(() => r({ error: "timeout" }), timeoutSec); try { (t as any).unref?.(); } catch { /* ignore */ } });
 			const winner: any = await Promise.race([pending.promise, timeout]);
 			if (winner.error) return { content: [{ type: "text" as const, text: `error: ${winner.error}` }], details: { error: winner.error } };
 			return { content: [{ type: "text" as const, text: typeof winner.response === "string" ? winner.response : JSON.stringify(winner.response, null, 2) }], details: { response: winner.response } };
 		},
-		renderCall(args, theme) { return new Text(theme.fg("toolTitle", theme.bold("hub_await ")) + theme.fg("warning", (args as any).msg_id ?? "?"), 0, 0); },
+		renderCall(args, theme) { const a = args as any; const t = a.timeout_seconds ? ` (${a.timeout_seconds}s timeout)` : ""; return new Text(theme.fg("toolTitle", theme.bold("hub_await ")) + theme.fg("warning", a.msg_id ?? "?") + theme.fg("dim", t), 0, 0); },
 		renderResult(result, _options, theme) { const d = result.details as any; return d?.error ? new Text(theme.fg("error", `✗ ${d.error}`), 0, 0) : new Text(theme.fg("success", "✓ response"), 0, 0); },
 	});
 
 	pi.registerTool({
 		name: "hub_status", label: "Hub Status",
-		description: "Show your connection status, model, context usage, and any pending inbound messages.",
-		parameters: Type.Object({}),
-		async execute() {
+		description: "Show or update your connection status, profile, context usage, and any pending inbound messages. Set description, skills, current_task, availability, or groups to update your agent profile visible to peers.",
+		parameters: Type.Object({
+			description: Type.Optional(Type.String({ description: "Update your agent description." })),
+			skills: Type.Optional(Type.Array(Type.String(), { description: "Update your skills list." })),
+			current_task: Type.Optional(Type.String({ description: "Update your current task." })),
+			availability: Type.Optional(Type.Union([Type.Literal("online"), Type.Literal("busy"), Type.Literal("away"), Type.Literal("offline")], { description: "Update your availability." })),
+			groups: Type.Optional(Type.Array(Type.String(), { description: "Update your group memberships (e.g. #frontend, #backend)." })),
+		}),
+		async execute(_callId, params: any) {
+			// Apply profile updates if provided
+			let updated = false;
+			if (typeof params.description === "string") { agentProfile.description = params.description; updated = true; }
+			if (Array.isArray(params.skills)) { agentProfile.skills = params.skills; updated = true; }
+			if (typeof params.current_task === "string") { agentProfile.current_task = params.current_task; updated = true; }
+			if (typeof params.availability === "string") { agentProfile.availability = params.availability; updated = true; }
+			if (Array.isArray(params.groups)) { agentProfile.groups = params.groups; updated = true; }
+
+			// Push updates to hub immediately if connected
+			if (updated && identity && serverUrl && authToken && connected) {
+				api("POST", `/v1/agents/${encodeURIComponent(identity.session_id)}/heartbeat`, {
+					description: agentProfile.description,
+					skills: agentProfile.skills,
+					current_task: agentProfile.current_task,
+					availability: agentProfile.availability,
+					groups: agentProfile.groups,
+				}).catch(() => {});
+			}
+
 			const ctx = currentCtx;
 			const pct = ctx ? Math.round(ctx.getContextUsage()?.percent ?? 0) : 0;
-			return { content: [{ type: "text" as const, text: `name: ${identity?.name ?? "?"}\nmodel: ${identity?.model ?? "?"}\ncontext: ${pct}%\ninbound queue: ${inboundQueue.size}\npeers: ${poolAgents.length}\nhub: ${serverUrl}` }], details: { name: identity?.name, model: identity?.model, context_pct: pct, inbound_queue: inboundQueue.size, peers: poolAgents.length } };
+			const lines = [
+				`name: ${identity?.name ?? "?"}`,
+				`model: ${identity?.model ?? "?"}`,
+				`description: ${agentProfile.description || "(none)"}`,
+				`skills: ${agentProfile.skills.length > 0 ? agentProfile.skills.join(", ") : "(none)"}`,
+				`current_task: ${agentProfile.current_task || "(none)"}`,
+				`availability: ${agentProfile.availability}`,
+				`groups: ${agentProfile.groups.length > 0 ? agentProfile.groups.join(", ") : "(none)"}`,
+				`context: ${pct}%`,
+				`inbound queue: ${inboundQueue.size}`,
+				`peers: ${poolAgents.length}`,
+				`hub: ${serverUrl}`,
+			];
+			return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { name: identity?.name, model: identity?.model, description: agentProfile.description, skills: agentProfile.skills, current_task: agentProfile.current_task, availability: agentProfile.availability, groups: agentProfile.groups, context_pct: pct, inbound_queue: inboundQueue.size, peers: poolAgents.length } };
 		},
-		renderCall(args, theme) { return new Text(theme.fg("toolTitle", theme.bold("hub_status")), 0, 0); },
-		renderResult(result, _options, theme) { const d = result.details as any; if (!d) return new Text("", 0, 0); return new Text(theme.fg("accent", `${d.name}`) + theme.fg("dim", ` · ${d.model} · ${d.context_pct}% · ${d.peers} peers`), 0, 0); },
+		renderCall(args, theme) { const updated = (args as any).description || (args as any).availability || (args as any).skills; return new Text(theme.fg("toolTitle", theme.bold("hub_status")) + (updated ? theme.fg("warning", " (update)") : ""), 0, 0); },
+		renderResult(result, _options, theme) { const d = result.details as any; if (!d) return new Text("", 0, 0); return new Text(theme.fg("accent", `${d.name}`) + theme.fg("dim", ` · ${d.model} · ${d.availability} · ${d.context_pct}% · ${d.peers} peers`), 0, 0); },
+	});
+
+	// ━━ hub_capabilities ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+	pi.registerTool({
+		name: "hub_capabilities", label: "Hub Capabilities",
+		description: "Search the peerstack hub for agents by skill, topic, or group. Returns matching agents with their capabilities.",
+		parameters: Type.Object({
+			skill: Type.Optional(Type.String({ description: "Filter by skill name (e.g. 'frontend', 'python')." })),
+			topic: Type.Optional(Type.String({ description: "Filter by topic/description keyword." })),
+			group: Type.Optional(Type.String({ description: "Filter by group name (e.g. '#frontend')." })),
+		}),
+		async execute(_callId, params: any) {
+			const qs = new URLSearchParams();
+			if (params.skill) qs.set("skill", params.skill);
+			if (params.topic) qs.set("topic", params.topic);
+			if (params.group) qs.set("group", params.group.replace(/^#/, ""));
+			const resp = await api("GET", `/v1/capabilities?${qs.toString()}`);
+			const agents: any[] = resp?.agents ?? [];
+			if (agents.length === 0) {
+				const filter = params.skill || params.topic || params.group || "any";
+				return { content: [{ type: "text" as const, text: `No agents found matching "${filter}".` }], details: { count: 0, agents: [] } };
+			}
+			const lines = agents.map((a: any) =>
+				`● ${a.name} [${a.availability}]\n  skills: ${(a.skills || []).join(", ") || "none"}\n  task: ${a.current_task || "idle"}\n  groups: ${(a.groups || []).join(", ") || "none"}\n  desc: ${a.description || "-"}`
+			);
+			return { content: [{ type: "text" as const, text: `${agents.length} agent(s) found:\n\n${lines.join("\n\n")}` }], details: { count: agents.length, agents } };
+		},
+		renderCall(args, theme) {
+			const a = args as any;
+			const filter = a.skill || a.topic || a.group || "all";
+			return new Text(theme.fg("toolTitle", theme.bold("hub_capabilities ")) + theme.fg("accent", filter), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const d = result.details as any;
+			return new Text(theme.fg("success", `✓ ${d?.count ?? 0} agent(s) found`), 0, 0);
+		},
+	});
+
+	// ━━ hub_subscribe ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+	pi.registerTool({
+		name: "hub_subscribe", label: "Hub Subscribe",
+		description: "Subscribe to presence updates — get notified when agents come online or change status.",
+		parameters: Type.Object({
+			event: Type.String({ description: "Event type to subscribe to. Currently supports: 'presence'." }),
+		}),
+		async execute(_callId, params: any) {
+			if (!identity) throw new Error("not connected to peerstack hub");
+			const eventType = params.event || "presence";
+			const resp = await api("POST", "/v1/subscriptions", {
+				subscriber_session: identity.session_id,
+				event_types: [eventType],
+			});
+			return {
+				content: [{ type: "text" as const, text: `Subscribed to ${eventType} events.\nsubscription_id: ${resp.subscription_id}` }],
+				details: { subscription_id: resp.subscription_id, event_types: resp.event_types },
+			};
+		},
+		renderCall(args, theme) {
+			return new Text(theme.fg("toolTitle", theme.bold("hub_subscribe ")) + theme.fg("accent", (args as any).event ?? "presence"), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const d = result.details as any;
+			return new Text(theme.fg("success", `✓ subscribed (${d?.subscription_id ? shortId(d.subscription_id) : "?"})`), 0, 0);
+		},
 	});
 
 	// ━━ System Prompt: tell LLM about peerstack hub ━━━━━━━━━━━━━━━━━━━
@@ -535,16 +708,14 @@ export default function (pi: ExtensionAPI) {
 		if (!identity) return {};
 		let extra = "";
 
-		// Inject pending inbound messages into system prompt so LLM sees and responds
 		const pending = [...inboundQueue.values()].filter(i => !i.fulfilled);
 		for (const inbound of pending) {
 			extra += `\n[INBOUND from ${inbound.sender_name}]\n${inbound.prompt_text || "..."}\n\nRespond to ${inbound.sender_name} directly. Your response will be automatically sent back.\n`;
 		}
 
-		// Inject peer list
 		if (poolAgents.length > 0) {
-			const peers = poolAgents.map(a => `${a.name}#${shortId(a.session_id)}${isSelf(a) ? " (you)" : ""} (${abbreviateModel(a.model)})`).join(", ");
-			extra += `\n<peerstack>\nConnected agents: ${peers}\nUse hub_list, hub_send, hub_await to communicate with peers.\n</peerstack>`;
+			const peers = poolAgents.map(a => `${a.name}#${shortId(a.session_id)}${isSelf(a) ? " (you)" : ""} (${abbreviateModel(a.model)})${a.availability ? ` [${a.availability}]` : ""}${a.groups?.length ? ` ${a.groups.join(' ')}` : ""}`).join(", ");
+			extra += `\n<peerstack>\nConnected agents: ${peers}\nUse hub_list, hub_send, hub_await, hub_capabilities, hub_subscribe, hub_status to communicate with peers.\n</peerstack>`;
 		}
 
 		if (!extra) return {};
@@ -563,13 +734,18 @@ export default function (pi: ExtensionAPI) {
 				} else if (agents.length === 0) {
 					ctx.ui.notify("📡 No agents on hub.\n  Start agents: stak spawn <name>", "info");
 				} else {
-					const lines = agents.map(a => `${a.status === "online" ? "●" : a.status === "stale" ? "~" : "✗"} ${a.name}#${shortId(a.session_id)}${isSelf(a) ? " (you)" : ""} (${abbreviateModel(a.model)}) ${Math.round(a.context_used_pct)}% ${a.queue_depth > 0 ? "⚡" : ""}`).join("\n");
+					const lines = agents.map(a => `${a.status === "online" ? "●" : a.status === "stale" ? "~" : "✗"} ${a.name}#${shortId(a.session_id)}${isSelf(a) ? " (you)" : ""} (${abbreviateModel(a.model)}) [${a.availability || "?"}] ${Math.round(a.context_used_pct)}% ${a.queue_depth > 0 ? "⚡" : ""}${a.groups?.length ? ` ${a.groups.join(' ')}` : ""}`).join("\n");
 					ctx.ui.notify(`📡 ${agents.length} agent(s):\n${lines}`, "info");
 				}
 			} else if (trimmed === "status" || trimmed === "info") {
 				ctx.ui.notify(
 					`name: ${identity?.name ?? "?"} #${identity?.session_id ? shortId(identity.session_id) : "?"}\n` +
 					`model: ${identity?.model ?? "?"}\n` +
+					`description: ${agentProfile.description || "(none)"}\n` +
+					`skills: ${agentProfile.skills.length ? agentProfile.skills.join(", ") : "(none)"}\n` +
+					`current task: ${agentProfile.current_task || "(none)"}\n` +
+					`availability: ${agentProfile.availability}\n` +
+					`groups: ${agentProfile.groups.length ? agentProfile.groups.join(", ") : "(none)"}\n` +
 					`status: ${connected ? "connected" : "disconnected"}\n` +
 					`hub: ${serverUrl ?? "?"}\n` +
 					`agents on hub: ${poolAgents.length}\n` +
@@ -583,7 +759,7 @@ export default function (pi: ExtensionAPI) {
 					"  /hub list       Show connected agents\n" +
 					"  /hub status     Show your connection info\n" +
 					"\n" +
-					"Or ask the agent to use: hub_list, hub_send, hub_await",
+					"Or ask the agent to use: hub_list, hub_send, hub_await, hub_capabilities, hub_subscribe, hub_status",
 					"info"
 				);
 			}

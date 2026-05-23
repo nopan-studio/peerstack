@@ -55,11 +55,15 @@ function isLoopback(host: string): boolean { return host === "127.0.0.1" || host
 // ═══════════════════════════════════════════════════════════════════════════
 
 type AgentStatus = "online" | "stale" | "offline";
-type MessageStatus = "queued" | "delivered" | "complete" | "error" | "timeout";
+type Availability = "online" | "busy" | "away" | "offline";
+type MessageStatus = "sent" | "queued" | "delivered" | "read" | "complete" | "error" | "timeout";
+type MessagePriority = "low" | "normal" | "high" | "urgent";
 
 interface AgentCard {
 	session_id: string; name: string; purpose: string; model: string;
 	color: string; cwd: string; explicit: boolean;
+	description: string; skills: string[]; current_task: string;
+	availability: Availability; groups: string[];
 	context_used_pct: number; queue_depth: number; status: AgentStatus;
 	started_at: string; last_seen_at: string;
 }
@@ -68,14 +72,22 @@ interface ComsMessage {
 	msg_id: string; sender_session: string; target_session: string;
 	sender_name: string; target_name: string;
 	prompt: string; status: MessageStatus;
+	priority: MessagePriority; reply_to?: string; thread_id?: string;
 	response?: any; error?: string | null;
-	created_at: number; delivered_at?: number; completed_at?: number;
+	created_at: number; delivered_at?: number; read_at?: number; completed_at?: number;
+	// broadcast / multicast
+	is_broadcast: boolean; broadcast_id?: string; child_msg_ids?: string[];
 }
 
-type SseWriter = { enqueue: (s: string) => void; close: () => void; lastId: number; };
+interface SseWriter { enqueue: (s: string) => void; close: () => void; lastId: number; }
 
 interface LogEntry {
 	time: Date; from: string; to: string; msg_id: string; action: string; detail?: string;
+}
+
+interface PresenceSubscription {
+	subscription_id: string; subscriber_session: string;
+	event_types: string[]; created_at: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -88,9 +100,9 @@ const messages = new Map<string, ComsMessage>();
 const streams = new Map<string, SseWriter>();
 const messageLog: LogEntry[] = [];
 const conversationTracker = new Map<string, { from: string; to: string; preview: string; time: number }>();
+const subscriptions = new Map<string, PresenceSubscription>();
 let startupTime = Date.now();
 
-// ── Cached dashboard output (avoid redraw when nothing changed) ──
 let lastOutput = "";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -135,20 +147,25 @@ function broadcast(event: string, data: unknown, excludeSession?: string): void 
 
 function sendTo(sessionId: string, event: string, data: unknown): void {
 	const w = streams.get(sessionId);
-	console.log(`[hub] sendTo called: sessionId=${sessionId.slice(-6)}, event=${event}`);
-	console.log(`[hub] sendTo: streams map has ${streams.size} entries, keys: ${[...streams.keys()].map(s => s.slice(-6)).join(", ")}`);
-	if (!w) {
-		console.log(`[hub] sendTo FAILED: No stream for ${sessionId}`);
-		return;
-	}
+	if (!w) return;
 	const id = ++w.lastId;
-	try {
-		const sseData = sse(event, data, id);
-		console.log(`[hub] sendTo: enqueueing id=${id}, data length=${sseData.length}`);
-		w.enqueue(sseData);
-		console.log(`[hub] Sent ${event} to ${sessionId.slice(-6)}, id=${id}`);
-	} catch (e) {
-		console.log(`[hub] sendTo enqueue failed:`, e);
+	try { w.enqueue(sse(event, data, id)); } catch { /* closed */ }
+}
+
+function notifyPresenceSubscribers(agent: AgentCard): void {
+	for (const [, sub] of subscriptions) {
+		if (sub.event_types.includes("presence")) {
+			sendTo(sub.subscriber_session, "presence_update", {
+				agent: {
+					session_id: agent.session_id,
+					name: agent.name,
+					availability: agent.availability,
+					status: agent.status,
+					current_task: agent.current_task,
+				},
+				timestamp: nowIso(),
+			});
+		}
 	}
 }
 
@@ -158,6 +175,18 @@ function resolveTarget(nameOrSession: string): AgentCard | undefined {
 	const bySession = agents.get(nameOrSession); if (bySession) return bySession;
 	const sid = nameIndex.get(nameOrSession); if (sid) return agents.get(sid);
 	return undefined;
+}
+
+function resolveGroupTarget(groupName: string): AgentCard[] {
+	// group names are @name or #name — strip prefix and match against agent groups
+	const clean = groupName.replace(/^[@#]/, "").toLowerCase();
+	const matches: AgentCard[] = [];
+	for (const a of agents.values()) {
+		if (a.groups && a.groups.some(g => g.toLowerCase() === clean || g.toLowerCase().replace(/^#/, "") === clean)) {
+			matches.push(a);
+		}
+	}
+	return matches;
 }
 
 function updateNameIndex(name: string, sessionId: string): void {
@@ -184,7 +213,6 @@ function padRight(s: string, n: number): string {
 }
 
 function visibleLen(s: string): number {
-	// Strip ANSI escape sequences to get visible length
 	return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").length;
 }
 
@@ -219,7 +247,6 @@ function buildDashboard(cols: number): string[] {
 	const totalMsgs = messageLog.length;
 	const uptime = Math.floor((Date.now() - startupTime) / 1000);
 
-	// ── Header bar ──
 	const header = C.cyan + " peerstack hub " + C.reset +
 		C.dim + process.pid + C.reset +
 		" | " + C.dim + "up " + uptime + "s" + C.reset +
@@ -228,7 +255,6 @@ function buildDashboard(cols: number): string[] {
 	lines.push(padRight(header, cols));
 	lines.push(C.dim + "─".repeat(cols) + C.reset);
 
-	// ── Agents section ──
 	if (agentList.length === 0) {
 		lines.push(C.dim + "  waiting for agents to connect..." + C.reset);
 	} else {
@@ -236,31 +262,25 @@ function buildDashboard(cols: number): string[] {
 			const dot = a.status === "online" ? C.green + "●" + C.reset
 				: a.status === "stale" ? C.yellow + "○" + C.reset
 				: C.red + "●" + C.reset;
-
 			const name = C.bold + a.name + C.reset;
 			const model = C.dim + shortModel(a.model) + C.reset;
-
-			const active = a.queue_depth > 0 && a.status === "online"
-				? C.yellow + " ⚡" + C.reset : "";
-
+			const active = a.queue_depth > 0 && a.status === "online" ? C.yellow + " ⚡" + C.reset : "";
 			const statusTag = a.status === "online" ? C.green + "online" + C.reset
 				: a.status === "stale" ? C.yellow + "stale" + C.reset
 				: C.red + "off" + C.reset;
-
-			// Context bar
 			const filled = Math.max(0, Math.min(8, Math.round((a.context_used_pct / 100) * 8)));
 			const bar = C.green + "█".repeat(filled) + C.dim + "█".repeat(8 - filled) + C.reset;
 			const pct = C.cyan + String(Math.round(a.context_used_pct)).padStart(3) + "%" + C.reset;
-
-			const line = "  " + dot + " " + name + " " + model + active + "  " + bar + " " + pct + "  " + statusTag;
+			const avail = a.availability === "busy" ? C.yellow + "⚡" + C.reset
+			: a.availability === "away" ? C.dim + "💤" + C.reset
+			: "";
+		const groups = a.groups && a.groups.length > 0 ? C.dim + " " + a.groups.join(" ") + C.reset : "";
+		const line = "  " + dot + " " + name + " " + model + avail + active + "  " + bar + " " + pct + "  " + statusTag + groups;
 			lines.push(padRight(line, cols));
 		}
 	}
 
-	// ── Divider ──
 	lines.push("");
-
-	// ── Active Conversations ──
 	lines.push(C.bold + "  ↔ Conversations" + C.reset);
 	const convos = [...conversationTracker.values()].sort((a, b) => b.time - a.time).slice(0, 3);
 	if (convos.length === 0) {
@@ -274,10 +294,7 @@ function buildDashboard(cols: number): string[] {
 		}
 	}
 
-	// ── Divider ──
 	lines.push("");
-
-	// ── Message Log ──
 	lines.push(C.bold + "  ↝ Messages" + C.reset);
 	const recentLogs = messageLog.slice(-Math.max(2, 6 - agentList.length)).reverse();
 	if (recentLogs.length === 0) {
@@ -296,11 +313,9 @@ function buildDashboard(cols: number): string[] {
 		}
 	}
 
-	// ── Footer ──
 	lines.push("");
 	lines.push(C.dim + "─".repeat(cols) + C.reset);
 	lines.push(C.dim + "  q quit  |  " + agentList.length + " agent" + (agentList.length !== 1 ? "s" : "") + C.reset);
-
 	return lines;
 }
 
@@ -309,21 +324,62 @@ let lastBuiltKey = "";
 function dashboardRender(): void {
 	const cols = process.stdout.columns ?? 80;
 	const rows = process.stdout.rows ?? 24;
-
-	// Reactively check all state — agents, messages, conversations, context %
 	const stateKey = agents.size + "|" + messageLog.length + "|" + conversationTracker.size + "|" +
 		[...agents.values()].map(a => Math.round(a.context_used_pct) + "|" + a.queue_depth + "|" + a.status).join(",");
 	if (stateKey === lastBuiltKey) return;
 	lastBuiltKey = stateKey;
-
 	const lines = buildDashboard(cols);
 	const output = lines.slice(0, rows - 1).join("\n");
-
 	if (output === lastOutput) return;
 	lastOutput = output;
-
-	// Move to home and overwrite (no full clear — avoids flicker)
 	process.stdout.write("\x1b[H" + output + "\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SSE Stream Factory — queue-based pull pattern
+// ═══════════════════════════════════════════════════════════════════════════
+
+function createSseStream(session_id: string, initialEvents: string[]): { stream: ReadableStream<Uint8Array>; writer: SseWriter } {
+	const enc = new TextEncoder();
+	const queue: string[] = [...initialEvents];
+	let pullResolve: (() => void) | null = null;
+	let closed = false;
+
+	function signalPull() {
+		if (pullResolve) { const r = pullResolve; pullResolve = null; r(); }
+	}
+
+	const stream = new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			while (queue.length === 0 && !closed) {
+				await new Promise<void>(resolve => { pullResolve = resolve; });
+			}
+			if (closed && queue.length === 0) return;
+			while (queue.length > 0) {
+				try { controller.enqueue(enc.encode(queue.shift()!)); } catch { return; }
+			}
+		},
+		cancel() {
+			closed = true;
+			signalPull();
+			streams.delete(session_id);
+		},
+	});
+
+	const writer: SseWriter = {
+		lastId: initialEvents.length,
+		enqueue(s: string) {
+			if (closed) return;
+			queue.push(s);
+			signalPull();
+		},
+		close() {
+			closed = true;
+			signalPull();
+		},
+	};
+
+	return { stream, writer };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -341,14 +397,18 @@ async function handleRegister(req: Request): Promise<Response> {
 	const card: AgentCard = {
 		session_id, name, purpose: body.purpose ?? "", model: body.model ?? "unknown",
 		color: body.color ?? "#888888", cwd: body.cwd ?? "", explicit: body.explicit === true,
+		description: body.description ?? existing?.description ?? "",
+		skills: Array.isArray(body.skills) ? body.skills : existing?.skills ?? [],
+		current_task: body.current_task ?? existing?.current_task ?? "",
+		availability: body.availability ?? existing?.availability ?? "online",
+		groups: Array.isArray(body.groups) ? body.groups : existing?.groups ?? [],
 		context_used_pct: existing?.context_used_pct ?? 0, queue_depth: existing?.queue_depth ?? 0,
 		status: "online", started_at: existing?.started_at ?? nowIso(), last_seen_at: nowIso(),
 	};
 	agents.set(session_id, card);
 	updateNameIndex(name, session_id);
-	console.log(`[hub] Agent registered: ${name}#${session_id.slice(-6)}, streams map size: ${streams.size}`);
 	broadcast("agent_joined", { agent: card }, session_id);
-	lastBuiltKey = ""; // force redraw
+	lastBuiltKey = "";
 	return json({ ok: true, agent: card, sse_url: `/v1/events?session_id=${encodeURIComponent(session_id)}` });
 }
 
@@ -358,45 +418,42 @@ function handleEvents(req: Request, url: URL): Response {
 	const entry = agents.get(session_id);
 	if (!entry) return json({ ok: false, error: "agent not found" }, 404);
 
-	const enc = new TextEncoder();
-	
-	// Create the ReadableStream controller first
-	const controller = new ReadableStream<Uint8Array>({
-		start(c) {
-			try { c.enqueue(enc.encode(sse("hello", { server_time: nowIso() }, 1))); } catch { /* noop */ }
-			const agentsList = [...agents.values()].filter(a => a.session_id !== session_id && !a.explicit);
-			try { c.enqueue(enc.encode(sse("pool_snapshot", { agents: agentsList }, 2))); } catch { /* noop */ }
-			
-			// Send periodic keepalive to prevent timeout
-			const keepaliveInterval = setInterval(() => {
-				try { c.enqueue(enc.encode(": keepalive\n\n")); } catch { clearInterval(keepaliveInterval); }
-			}, SSE_KEEPALIVE_MS);
-			
-			// Store interval for cleanup
-			(c as any)._keepalive = keepaliveInterval;
-		},
-		cancel() {
-			const cur = streams.get(session_id); if (cur === writer) streams.delete(session_id);
-			// Clear keepalive
-			if ((this as any)._keepalive) clearInterval((this as any)._keepalive);
-		},
-	});
+	const hello = sse("hello", { server_time: nowIso() }, 1);
+	const agentsList = [...agents.values()].filter(a => a.session_id !== session_id && !a.explicit).map(a => ({
+		session_id: a.session_id, name: a.name, model: a.model,
+		color: a.color, status: a.status, availability: a.availability,
+		description: a.description, skills: a.skills, current_task: a.current_task,
+		groups: a.groups, context_used_pct: a.context_used_pct, queue_depth: a.queue_depth,
+	}));
+	const poolSnap = sse("pool_snapshot", { agents: agentsList }, 2);
 
-	// Now create the writer that references the controller
-	let writer: SseWriter = { lastId: 2, enqueue(s: string) { try { controller.enqueue(enc.encode(s)); } catch { /* closed */ } }, close() { /* noop */ } };
+	const { stream, writer } = createSseStream(session_id, [hello, poolSnap]);
 
-	const old = streams.get(session_id); if (old && old !== writer) { try { old.close(); } catch { /* noop */ } }
+	const old = streams.get(session_id);
+	if (old) { try { old.close(); } catch { /* noop */ } }
 	streams.set(session_id, writer);
 
-	console.log(`[hub] SSE stream opened for ${entry.name}#${session_id.slice(-6)}, total streams: ${streams.size}`);
+	// Redeliver queued messages
+	const queuedForTarget = [...messages.values()].filter(m => m.target_session === session_id && m.status === "queued");
+	for (const msg of queuedForTarget) {
+		const sender = agents.get(msg.sender_session);
+		sendTo(session_id, "prompt", {
+			msg_id: msg.msg_id,
+			sender: { session_id: msg.sender_session, name: msg.sender_name, cwd: sender?.cwd ?? "" },
+			prompt: msg.prompt, hops: 0,
+		});
+		msg.status = "delivered";
+		msg.delivered_at = Date.now();
+		if (sender) sendTo(msg.sender_session, "message_status", { msg_id: msg.msg_id, status: "delivered" });
+	}
 
 	req.signal.addEventListener("abort", () => {
-		console.log(`[hub] SSE stream closed for ${entry.name}#${session_id.slice(-6)}`);
-		const cur = streams.get(session_id); if (cur === writer) streams.delete(session_id);
-		const left = agents.get(session_id); if (left) broadcast("agent_left", { session_id, name: left.name }, session_id);
+		writer.close();
+		const left = agents.get(session_id);
+		if (left) broadcast("agent_left", { session_id, name: left.name }, session_id);
 	});
 
-	return new Response(controller, {
+	return new Response(stream, {
 		status: 200,
 		headers: {
 			"content-type": "text/event-stream; charset=utf-8",
@@ -419,8 +476,21 @@ async function handleHeartbeat(req: Request, sessionId: string): Promise<Respons
 	if (typeof body.context_used_pct === "number") entry.context_used_pct = body.context_used_pct;
 	if (typeof body.queue_depth === "number") entry.queue_depth = body.queue_depth;
 	if (typeof body.model === "string") entry.model = body.model;
+	if (typeof body.description === "string") entry.description = body.description;
+	if (Array.isArray(body.skills)) entry.skills = body.skills;
+	if (typeof body.current_task === "string") entry.current_task = body.current_task;
+	if (typeof body.availability === "string") entry.availability = body.availability as Availability;
+	if (Array.isArray(body.groups)) entry.groups = body.groups;
+
+	const prevAvailability = entry.availability;
+	const prevStatus = entry.status;
 	entry.status = "online";
 	entry.last_seen_at = nowIso();
+
+	// Notify presence subscribers on status/availability change
+	if (prevStatus !== "online" || prevAvailability !== entry.availability) {
+		notifyPresenceSubscribers(entry);
+	}
 
 	return json({ ok: true });
 }
@@ -432,59 +502,198 @@ function handleListAgents(): Response {
 function handleGetMessage(msg_id: string): Response {
 	const m = messages.get(msg_id);
 	if (!m) return json({ ok: false, error: "not found" }, 404);
-	return json({ msg_id: m.msg_id, status: m.status, response: m.response ?? null, error: m.error ?? null });
+
+	// If broadcast, aggregate child message statuses
+	if (m.is_broadcast && m.child_msg_ids) {
+		const childStatuses: Record<string, any> = {};
+		const responses: any[] = [];
+		let allDone = true;
+		let hasError = false;
+		for (const cid of m.child_msg_ids) {
+			const child = messages.get(cid);
+			if (!child) continue;
+			childStatuses[cid] = { status: child.status, target: child.target_name, error: child.error };
+			if (child.status === "complete") {
+				responses.push({ target: child.target_name, session_id: child.target_session, response: child.response });
+			} else if (child.status === "error") {
+				hasError = true;
+				responses.push({ target: child.target_name, session_id: child.target_session, error: child.error });
+			} else {
+				allDone = false;
+			}
+		}
+		const aggStatus: MessageStatus = allDone ? (hasError ? "error" : "complete") : "delivered";
+		return json({
+			msg_id: m.msg_id,
+			status: aggStatus,
+			is_broadcast: true,
+			child_count: m.child_msg_ids.length,
+			child_statuses: childStatuses,
+			responses,
+			error: hasError && allDone ? "some targets returned errors" : null,
+		});
+	}
+
+	return json({
+		msg_id: m.msg_id,
+		status: m.status,
+		response: m.response ?? null,
+		error: m.error ?? null,
+		priority: m.priority,
+		reply_to: m.reply_to ?? null,
+		thread_id: m.thread_id ?? null,
+	});
 }
 
 async function handleSendMessage(req: Request): Promise<Response> {
 	let body: any;
 	try { body = await req.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400); }
-	if (!body?.sender_session || !body?.target || !body?.prompt) return json({ ok: false, error: "missing fields" }, 400);
+
+	// Support both `target` (string) and `targets` (array)
+	const rawTargets: string[] = [];
+	if (typeof body.target === "string") rawTargets.push(body.target);
+	if (Array.isArray(body.targets)) rawTargets.push(...body.targets);
+	if (rawTargets.length === 0 || !body?.sender_session || !body?.prompt) {
+		return json({ ok: false, error: "missing fields: sender_session, prompt, and target(s) required" }, 400);
+	}
 
 	const sender = agents.get(body.sender_session);
 	if (!sender) return json({ ok: false, error: "sender not found" }, 404);
-	const target = resolveTarget(body.target);
-	if (!target) return json({ ok: false, error: `target "${body.target}" not found` }, 404);
-
-	console.log(`[hub] handleSendMessage: sender=${sender.name}#${sender.session_id.slice(-6)}, target=${target.name}#${target.session_id.slice(-6)}`);
-	console.log(`[hub] handleSendMessage: streams map has ${streams.size} entries`);
-	for (const [sid, w] of streams) {
-		console.log(`[hub]   stream: ${sid.slice(-6)} (lastId=${w.lastId})`);
-	}
 
 	const hops = typeof body.hops === "number" ? body.hops : 0;
 	if (hops >= MAX_HOPS) return json({ ok: false, error: "hop limit exceeded" }, 409);
 
-	const depth = [...messages.values()].filter(m => m.target_session === target.session_id && (m.status === "queued" || m.status === "delivered")).length;
-	if (depth >= MAX_INBOX) return json({ ok: false, error: "inbox full" }, 429);
-
-	const msg_id = ulid();
-	const now = Date.now();
-	const msg: ComsMessage = {
-		msg_id, sender_session: body.sender_session, target_session: target.session_id,
-		sender_name: sender.name, target_name: target.name,
-		prompt: body.prompt, status: "queued", created_at: now,
-	};
-	messages.set(msg_id, msg);
-	conversationTracker.set(msg_id, { from: sender.name, to: target.name, preview: body.prompt, time: now });
-
-	const targetStream = streams.get(target.session_id);
-	console.log(`[hub] handleSendMessage: targetStream found=${!!targetStream}, target.session_id=${target.session_id.slice(-6)}`);
-	if (targetStream) {
-		console.log(`[hub] Sending prompt to ${target.name}#${target.session_id.slice(-6)}, stream exists: ${!!targetStream}`);
-		sendTo(target.session_id, "prompt", {
-			msg_id, sender: { session_id: sender.session_id, name: sender.name, cwd: sender.cwd },
-			prompt: body.prompt, hops,
-		});
-		msg.status = "delivered"; msg.delivered_at = Date.now();
-		sendTo(body.sender_session, "message_status", { msg_id, status: "delivered" });
-		console.log(`[hub] Message delivered, status updated`);
-	} else {
-		console.log(`[hub] WARNING: No stream found for target ${target.name}#${target.session_id.slice(-6)}`);
+	// Resolve targets: strings may be agent names, session_ids, or @group references
+	const resolvedTargets: AgentCard[] = [];
+	for (const t of rawTargets) {
+		if (t.startsWith("@") || t.startsWith("#")) {
+			// Group target
+			const groupMembers = resolveGroupTarget(t);
+			for (const m of groupMembers) {
+				if (!resolvedTargets.find(r => r.session_id === m.session_id)) {
+					resolvedTargets.push(m);
+				}
+			}
+		} else {
+			const target = resolveTarget(t);
+			if (!target) return json({ ok: false, error: `target "${t}" not found` }, 404);
+			if (!resolvedTargets.find(r => r.session_id === target.session_id)) {
+				resolvedTargets.push(target);
+			}
+		}
 	}
 
-	log({ time: new Date(), from: sender.name, to: target.name, msg_id, action: msg.status, detail: body.prompt.length > 30 ? body.prompt.slice(0, 30) + "..." : body.prompt });
-	lastBuiltKey = ""; // force redraw
-	return json({ ok: true, msg_id, status: msg.status, target_session: target.session_id });
+	if (resolvedTargets.length === 0) {
+		return json({ ok: false, error: "no valid targets resolved" }, 404);
+	}
+
+	const priority: MessagePriority = body.priority ?? "normal";
+	const reply_to: string | undefined = body.reply_to;
+	const thread_id: string | undefined = body.thread_id;
+	const isBroadcast = resolvedTargets.length > 1;
+
+	// Sort targets by priority (urgent first) for queue preemption
+	const priorityOrder: Record<MessagePriority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
+	// For broadcast: create a parent message + child messages
+	const broadcast_id = isBroadcast ? ulid() : undefined;
+	const now = Date.now();
+	const createdMsgIds: string[] = [];
+
+	for (const target of resolvedTargets) {
+		const depth = [...messages.values()].filter(m =>
+			m.target_session === target.session_id &&
+			(m.status === "sent" || m.status === "queued" || m.status === "delivered" || m.status === "read")
+		).length;
+		if (depth >= MAX_INBOX) {
+			// Skip full inboxes in broadcast; report as individual error
+			const errMsgId = ulid();
+			const errMsg: ComsMessage = {
+				msg_id: errMsgId, sender_session: body.sender_session, target_session: target.session_id,
+				sender_name: sender.name, target_name: target.name,
+				prompt: body.prompt, status: "error", priority,
+				reply_to, thread_id, error: "inbox full",
+				created_at: now, completed_at: now,
+				is_broadcast: false, broadcast_id,
+			};
+			messages.set(errMsgId, errMsg);
+			createdMsgIds.push(errMsgId);
+			continue;
+		}
+
+		const msg_id = ulid();
+		const msg: ComsMessage = {
+			msg_id, sender_session: body.sender_session, target_session: target.session_id,
+			sender_name: sender.name, target_name: target.name,
+			prompt: body.prompt, status: "sent", priority,
+			reply_to, thread_id,
+			created_at: now,
+			is_broadcast: false, broadcast_id,
+		};
+		messages.set(msg_id, msg);
+		createdMsgIds.push(msg_id);
+		conversationTracker.set(msg_id, { from: sender.name, to: target.name, preview: body.prompt, time: now });
+
+		const targetStream = streams.get(target.session_id);
+		if (targetStream) {
+			sendTo(target.session_id, "prompt", {
+				msg_id, sender: { session_id: sender.session_id, name: sender.name, cwd: sender.cwd },
+				prompt: body.prompt, hops,
+				reply_to, thread_id, priority,
+			});
+			msg.status = "delivered"; msg.delivered_at = Date.now();
+			sendTo(body.sender_session, "message_status", { msg_id, status: "delivered" });
+		} else {
+			msg.status = "error"; msg.error = "target not connected"; msg.completed_at = Date.now();
+			sendTo(body.sender_session, "message_status", { msg_id, status: "error", error: "target not connected" });
+		}
+
+		log({ time: new Date(), from: sender.name, to: target.name, msg_id, action: msg.status, detail: body.prompt.length > 30 ? body.prompt.slice(0, 30) + "..." : body.prompt });
+	}
+
+	// For broadcasts, return the broadcast_id. For single-target, return the child msg_id.
+	const returnMsgId = isBroadcast ? broadcast_id! : createdMsgIds[0];
+
+	// If broadcast, create a tracking entry
+	if (isBroadcast && broadcast_id) {
+		const broadcastMsg: ComsMessage = {
+			msg_id: broadcast_id, sender_session: body.sender_session, target_session: "",
+			sender_name: sender.name, target_name: resolvedTargets.map(t => t.name).join(", "),
+			prompt: body.prompt, status: "sent", priority,
+			reply_to, thread_id,
+			created_at: now,
+			is_broadcast: true, child_msg_ids: createdMsgIds,
+		};
+		messages.set(broadcast_id, broadcastMsg);
+	}
+
+	lastBuiltKey = "";
+	const firstChild = createdMsgIds.length > 0 ? messages.get(createdMsgIds[0]) : null;
+	const returnStatus = isBroadcast ? "sent" : (firstChild?.status ?? "sent");
+	return json({
+		ok: true,
+		msg_id: returnMsgId,
+		status: returnStatus,
+		is_broadcast: isBroadcast,
+		target_count: resolvedTargets.length,
+		target_session: isBroadcast ? undefined : resolvedTargets[0]?.session_id,
+		child_msg_ids: isBroadcast ? createdMsgIds : undefined,
+	});
+}
+
+async function handleMarkRead(req: Request, msg_id: string): Promise<Response> {
+	let body: any;
+	try { body = await req.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400); }
+	if (!body?.reader_session) return json({ ok: false, error: "missing reader_session" }, 400);
+	const msg = messages.get(msg_id);
+	if (!msg) return json({ ok: false, error: "message not found" }, 404);
+	if (body.reader_session !== msg.target_session) return json({ ok: false, error: "not the target" }, 403);
+	if (msg.status === "delivered") {
+		msg.status = "read";
+		msg.read_at = Date.now();
+		sendTo(msg.sender_session, "message_status", { msg_id, status: "read" });
+	}
+	return json({ ok: true, status: msg.status });
 }
 
 async function handleSubmitResponse(req: Request, msg_id: string): Promise<Response> {
@@ -494,12 +703,13 @@ async function handleSubmitResponse(req: Request, msg_id: string): Promise<Respo
 	const msg = messages.get(msg_id);
 	if (!msg) return json({ ok: false, error: "message not found" }, 404);
 	if (body.responder_session !== msg.target_session) return json({ ok: false, error: "not the target" }, 403);
-	if (msg.status === "complete" || msg.status === "error") return json({ ok: false, error: "already complete" }, 409);
+	if (msg.status === "complete" || msg.status === "error" || msg.status === "timeout") return json({ ok: false, error: "already complete" }, 409);
 
 	const isError = body.error != null;
 	msg.status = isError ? "error" : "complete";
 	msg.response = body.response ?? null;
 	msg.error = isError ? String(body.error) : null;
+	msg.read_at = Date.now();
 	msg.completed_at = Date.now();
 
 	sendTo(msg.sender_session, "response", { msg_id, response: msg.response, error: msg.error, status: msg.status });
@@ -508,7 +718,7 @@ async function handleSubmitResponse(req: Request, msg_id: string): Promise<Respo
 	const responder = agents.get(body.responder_session);
 	const responseLen = typeof msg.response === "string" ? msg.response.length : JSON.stringify(msg.response).length;
 	log({ time: new Date(), from: responder?.name ?? "?", to: msg.sender_name, msg_id, action: msg.status, detail: isError ? "error" : (responseLen > 100 ? Math.round(responseLen / 100) * 100 + "b" : responseLen + "b") });
-	lastBuiltKey = ""; // force redraw
+	lastBuiltKey = "";
 	return json({ ok: true });
 }
 
@@ -520,7 +730,7 @@ function handleDeleteAgent(sessionId: string): Response {
 	agents.delete(sessionId);
 	for (const [n, sid] of nameIndex) { if (sid === sessionId) nameIndex.delete(n); }
 	broadcast("agent_left", { session_id: sessionId, name: entry.name }, sessionId);
-	lastBuiltKey = ""; // force redraw
+	lastBuiltKey = "";
 	return json({ ok: true });
 }
 
@@ -535,12 +745,17 @@ function staleScan(): void {
 		if (Number.isNaN(last)) continue;
 		const dt = now - last;
 		if (dt > OFFLINE_AFTER_MS) {
+			card.availability = "offline";
+			notifyPresenceSubscribers(card);
 			agents.delete(sid); nameIndex.delete(card.name);
 			const s = streams.get(sid); if (s) { try { s.close(); } catch { /* noop */ } streams.delete(sid); }
 			broadcast("agent_left", { session_id: sid, name: card.name, reason: "offline" }, sid);
 			changed = true;
 		} else if (dt > STALE_AFTER_MS && card.status !== "stale") {
-			card.status = "stale"; changed = true;
+			card.status = "stale";
+			if (card.availability === "online") card.availability = "away";
+			notifyPresenceSubscribers(card);
+			changed = true;
 			broadcast("agent_stale", { session_id: sid, name: card.name, last_seen_at: card.last_seen_at }, sid);
 		}
 	}
@@ -548,15 +763,98 @@ function staleScan(): void {
 }
 
 function ttlScan(): void {
+	const inFlight: MessageStatus[] = ["sent", "queued", "delivered", "read"];
 	for (const [id, m] of messages) {
-		if (m.status === "complete" || m.status === "error") {
+		if (m.status === "complete" || m.status === "error" || m.status === "timeout") {
 			if (m.completed_at && Date.now() - m.completed_at > MESSAGE_TTL_MS) messages.delete(id);
-		} else if (Date.now() - m.created_at > MESSAGE_TTL_MS) {
-			m.status = "error"; m.error = "expired"; m.completed_at = Date.now();
-			sendTo(m.sender_session, "message_status", { msg_id: id, status: "error", error: "expired" });
+		} else if (inFlight.includes(m.status) && Date.now() - m.created_at > MESSAGE_TTL_MS) {
+			m.status = "timeout"; m.error = "expired"; m.completed_at = Date.now();
+			sendTo(m.sender_session, "message_status", { msg_id: id, status: "timeout", error: "expired" });
 			setTimeout(() => messages.delete(id), 1000);
 		}
 	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Capabilities
+// ═══════════════════════════════════════════════════════════════════════════
+
+function handleCapabilities(url: URL): Response {
+	const skill = url.searchParams.get("skill")?.toLowerCase();
+	const topic = url.searchParams.get("topic")?.toLowerCase();
+	const group = url.searchParams.get("group")?.toLowerCase();
+
+	let results: AgentCard[] = [...agents.values()];
+
+	if (skill) {
+		results = results.filter(a =>
+			a.skills.some(s => s.toLowerCase().includes(skill)) ||
+			a.description.toLowerCase().includes(skill)
+		);
+	}
+	if (topic) {
+		results = results.filter(a =>
+			a.skills.some(s => s.toLowerCase().includes(topic)) ||
+			a.description.toLowerCase().includes(topic) ||
+			a.name.toLowerCase().includes(topic)
+		);
+	}
+	if (group) {
+		results = results.filter(a =>
+			a.groups.some(g => g.toLowerCase().replace(/^#/, "") === group)
+		);
+	}
+
+	return json({
+		ok: true,
+		count: results.length,
+		agents: results.map(a => ({
+			session_id: a.session_id,
+			name: a.name,
+			description: a.description,
+			skills: a.skills,
+			current_task: a.current_task,
+			availability: a.availability,
+			groups: a.groups,
+			model: a.model,
+			status: a.status,
+		})),
+	});
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Subscriptions
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function handleCreateSubscription(req: Request): Promise<Response> {
+	let body: any;
+	try { body = await req.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400); }
+	if (!body?.subscriber_session || !body?.event_types) {
+		return json({ ok: false, error: "missing subscriber_session or event_types" }, 400);
+	}
+
+	const subscriber = agents.get(body.subscriber_session);
+	if (!subscriber) return json({ ok: false, error: "subscriber not found" }, 404);
+
+	const subscription_id = ulid();
+	const sub: PresenceSubscription = {
+		subscription_id,
+		subscriber_session: body.subscriber_session,
+		event_types: body.event_types,
+		created_at: Date.now(),
+	};
+	subscriptions.set(subscription_id, sub);
+
+	return json({ ok: true, subscription_id, event_types: sub.event_types });
+}
+
+function handleDeleteSubscription(req: Request, url: URL): Response {
+	const subscription_id = url.searchParams.get("subscription_id") ?? "";
+	if (!subscription_id) return json({ ok: false, error: "missing subscription_id" }, 400);
+	const sub = subscriptions.get(subscription_id);
+	if (!sub) return json({ ok: false, error: "subscription not found" }, 404);
+	subscriptions.delete(subscription_id);
+	return json({ ok: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -579,6 +877,9 @@ async function router(req: Request): Promise<Response> {
 	if (pathname === "/v1/events" && method === "GET") return handleEvents(req, url);
 	if (pathname === "/v1/agents" && method === "GET") return handleListAgents();
 	if (pathname === "/v1/messages" && method === "POST") return handleSendMessage(req);
+	if (pathname === "/v1/capabilities" && method === "GET") return handleCapabilities(url);
+	if (pathname === "/v1/subscriptions" && method === "POST") return handleCreateSubscription(req);
+	if (pathname === "/v1/subscriptions" && method === "DELETE") return handleDeleteSubscription(req, url);
 
 	const agentMatch = pathname.match(/^\/v1\/agents\/([^/]+)(?:\/(heartbeat))?$/);
 	if (agentMatch) {
@@ -588,11 +889,12 @@ async function router(req: Request): Promise<Response> {
 		return json({ ok: false, error: "method_not_allowed" }, 405);
 	}
 
-	const msgMatch = pathname.match(/^\/v1\/messages\/([^/]+)(?:\/(response))?$/);
+	const msgMatch = pathname.match(/^\/v1\/messages\/([^/]+)(?:\/(response|read))?$/);
 	if (msgMatch) {
 		const mid = decodeURIComponent(msgMatch[1]); const tail = msgMatch[2];
 		if (!tail && method === "GET") return handleGetMessage(mid);
 		if (tail === "response" && method === "POST") return handleSubmitResponse(req, mid);
+		if (tail === "read" && method === "POST") return handleMarkRead(req, mid);
 		return json({ ok: false, error: "method_not_allowed" }, 405);
 	}
 
@@ -629,7 +931,6 @@ function main(): void {
 		for (const [, w] of streams) { try { w.enqueue(frame); } catch { /* dead */ } }
 	}, SSE_KEEPALIVE_MS);
 
-	// Dashboard
 	dashboardInit();
 	process.stdout.write("peerstack hub: listening on " + localUrl + "\n");
 
@@ -644,7 +945,6 @@ function main(): void {
 	}
 	scheduleDashboard();
 
-	// Keypress: q to quit
 	readline.emitKeypressEvents(process.stdin as any);
 	if (process.stdin.isTTY) {
 		process.stdin.setRawMode!(true);
