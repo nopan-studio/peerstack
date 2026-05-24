@@ -50,7 +50,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function tmux(args: string[]): void {
-	const r = spawnSync("tmux", args, { stdio: "inherit" });
+	const r = spawnSync("tmux", args, { stdio: "pipe" });
 	if (r.status !== 0 && r.status !== null) {
 		// tmux kill-session exits non-zero if session doesn't exist — that's ok
 		const cmd = args.join(" ");
@@ -84,12 +84,11 @@ async function waitForHub(maxWaitMs = 30000): Promise<{ local_url: string; token
 // ── Main ──────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-	// 1. Kill existing session
-	console.log("peerstack: killing existing session (if any)...");
+	// 1. Silently kill existing session (non-zero exit if it doesn't exist is fine)
 	tmux(["kill-session", "-t", SESSION_NAME]);
 
 	// 2. Start hub in window 0
-	console.log("peerstack: starting hub...");
+	console.log(`peerstack: starting hub in tmux session "${SESSION_NAME}"...`);
 	tmux([
 		"new-session", "-d",
 		"-s", SESSION_NAME,
