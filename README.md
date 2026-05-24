@@ -30,7 +30,7 @@
 │  (+ ext)    │   (prompt/response) │  (Bun + dashboard)  │
 └─────────────┘                     └─────────────────────┘
        ▲                                    │
-       └────────── hub_list / hub_send ─────┘
+       └────────── hub_list / hub_send / hub_broadcast ─────┘
                 hub_await / hub_get
                 hub_status / hub_capabilities
                 hub_subscribe
@@ -113,6 +113,7 @@ Agents can use these tools automatically:
 |------|---------|
 | `hub_list` | List all connected agents |
 | `hub_send` | Send a prompt to a peer or group |
+| `hub_broadcast` | Send a prompt to all connected peers |
 | `hub_await` | Block until a reply arrives (with optional timeout) |
 | `hub_get` | Poll for a reply non-blocking |
 | `hub_status` | Show/update your profile & availability |
@@ -134,6 +135,20 @@ Or an agent can actively delegate:
 ```
 Use hub_send to ask builder to generate the API client, then hub_await for the result.
 ```
+
+Or broadcast to all peers at once:
+
+```
+Use hub_broadcast to ask all connected agents to check the README for typos.
+```
+
+Or use the slash command to signal a fresh start:
+
+```
+/hub new
+```
+
+Broadcasts a new-session signal to all peers. Each agent gets a notification: "Run /new to start fresh."
 
 ---
 
