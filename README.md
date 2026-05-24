@@ -96,6 +96,15 @@ Agents are defined in `agents/<name>.md` with YAML frontmatter (`name`, `model`,
 ./stak spawn builder --model google/gemini-3-flash-preview
 ```
 
+### One-command team start
+
+```bash
+./stak team
+```
+
+Spawns the hub + all agents from `agents/*.md` in a tmux session (`peerstack-team`).
+Attach with: `tmux attach -t peerstack-team`
+
 ### 3. Let agents talk
 
 Agents can use these tools automatically:

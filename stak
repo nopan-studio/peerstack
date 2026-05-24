@@ -12,6 +12,10 @@ case "${1:-}" in
     shift
     exec bun "$ROOT/scripts/spawn.ts" "$@"
     ;;
+  team)
+    shift
+    exec bun "$ROOT/scripts/tmux-start.ts" "$@"
+    ;;
   list)
     shift
     echo "Available agents:"
@@ -28,6 +32,7 @@ case "${1:-}" in
     echo "Usage:"
     echo "  stak hub                Start the hub (live dashboard)"
     echo "  stak spawn <name>       Spawn an agent from agents/<name>.md"
+    echo "  stak team               Start hub + all agents in tmux"
     echo "  stak list               List available agents"
     echo ""
     echo "Examples:"
