@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+case "${1:-}" in
+  hub)
+    shift
+    exec bun "$ROOT/hub/server.ts" "$@"
+    ;;
+  spawn)
+    shift
+    exec bun "$ROOT/scripts/spawn.ts" "$@"
+    ;;
+  team)
+    shift
+    exec bun "$ROOT/scripts/tmux-start.ts" "$@"
+    ;;
+  list)
+    shift
+    echo "Available agents:"
+    for f in "$ROOT"/agents/*.md; do
+      name=$(grep -m1 '^name:' "$f" 2>/dev/null | sed 's/name: *//; s/"//g' || basename "$f" .md)
+      desc=$(grep -m1 '^description:' "$f" 2>/dev/null | sed 's/description: *//; s/"//g' || "")
+      model=$(grep -m1 '^model:' "$f" 2>/dev/null | sed 's/model: *//; s/"//g' || "")
+      printf "  %-15s %-30s %s\n" "$name" "$model" "$desc"
+    done
+    ;;
+  *)
+    echo "peerstack — Pi-to-Pi agent mesh"
+    echo ""
+    echo "Usage:"
+    echo "  stak hub                Start the hub (live dashboard)"
+    echo "  stak spawn <name>       Spawn an agent from agents/<name>.md"
+    echo "  stak team               Start hub + all agents in tmux"
+    echo "  stak list               List available agents"
+    echo ""
+    echo "Examples:"
+    echo "  stak hub"
+    echo "  stak spawn planner"
+    echo "  stak spawn builder --model google/gemini-3-flash-preview"
+    exit 1
+    ;;
+esac

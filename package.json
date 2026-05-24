@@ -1,0 +1,10 @@
+{
+  "name": "peerstack",
+  "private": true,
+  "type": "module",
+  "description": "peerstack — Pi-to-Pi agent mesh with model-aware hub",
+  "scripts": {
+    "hub": "bun hub/server.ts",
+    "spawn": "bun scripts/spawn.ts"
+  }
+}
