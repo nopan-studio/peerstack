@@ -295,6 +295,20 @@ export default function (pi: ExtensionAPI) {
 					const promptText = data.prompt || "";
 					const threadInfo = data.thread_id ? ` [thread: ${data.thread_id}]` : "";
 					const replyInfo = data.reply_to ? ` (reply to: ${data.reply_to})` : "";
+
+					// System message: new session request
+					if (promptText === "__SYSTEM__:NEW_SESSION") {
+						setImmediate(() => {
+							if (currentCtx?.hasUI) {
+								currentCtx.ui.notify(
+									`📡 ${senderName} requested a new shared session. Run /new to start fresh.`,
+									"info"
+								);
+							}
+						});
+						break; // Do NOT add to inboundQueue
+					}
+
 					const inbound: InboundContext = {
 						msg_id, hops: typeof data.hops === "number" ? data.hops : 0,
 						sender_session: sender.session_id || "?", sender_name: senderName,
@@ -552,6 +566,48 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "hub_broadcast", label: "Hub Broadcast",
+		description: "Send a prompt to all connected peer agents (excluding self).",
+		parameters: Type.Object({
+			prompt: Type.String({ description: "The prompt to broadcast to all peers." }),
+			priority: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high"), Type.Literal("urgent")], { description: "Message priority. Default: normal." })),
+		}),
+		async execute(_callId, params) {
+			if (!identity) throw new Error("not connected to peerstack hub");
+			const agents = await fetchAllAgents();
+			const peers = agents.filter(a => !isSelf(a));
+			if (peers.length === 0) return { content: [{ type: "text" as const, text: "No peers connected." }], details: { count: 0 } };
+
+			const targets = peers.map(a => a.name);
+			const hops = currentInbound ? currentInbound.hops + 1 : 0;
+			if (hops >= MAX_HOPS) throw new Error(`hop limit reached (${hops}/${MAX_HOPS})`);
+
+			const body: any = {
+				sender_session: identity.session_id,
+				prompt: params.prompt,
+				targets,
+				hops,
+			};
+			if (params.priority) body.priority = params.priority;
+
+			const resp = await api("POST", "/v1/messages", body);
+			return {
+				content: [{ type: "text" as const, text: `hub_broadcast → ${peers.length} peer(s): ${peers.map(a => a.name).join(", ")}\nmsg_id ${resp?.msg_id}` }],
+				details: { msg_id: resp?.msg_id, count: peers.length, peers: peers.map(a => a.name) },
+			};
+		},
+		renderCall(args, theme) {
+			const p = (args as any).prompt ?? "";
+			const prev = p.length > 60 ? p.slice(0, 57) + "..." : p;
+			return new Text(theme.fg("toolTitle", theme.bold("hub_broadcast ")) + theme.fg("dim", "— ") + theme.fg("muted", prev), 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			const d = result.details as any;
+			return new Text(theme.fg("success", `→ broadcast to ${d?.count ?? 0} peer(s)`), 0, 0);
+		},
+	});
+
+	pi.registerTool({
 		name: "hub_get", label: "Hub Get",
 		description: "Non-blocking poll for a reply to hub_send. Returns status pending|complete|error.",
 		parameters: Type.Object({ msg_id: Type.String({ description: "msg_id from hub_send." }) }),
@@ -753,11 +809,40 @@ export default function (pi: ExtensionAPI) {
 					`inbound queue: ${inboundQueue.size}`,
 					"info"
 				);
+			} else if (trimmed === "new") {
+				const agents = await fetchAllAgents();
+				const peers = agents.filter(a => !isSelf(a));
+				if (peers.length === 0) {
+					ctx.ui.notify("📡 No peers connected to notify.", "warning");
+					return;
+				}
+				const peerNames = peers.map(a => a.name).join(", ");
+
+				// Broadcast the signal
+				const hops = currentInbound ? currentInbound.hops + 1 : 0;
+				if (hops >= MAX_HOPS) {
+					ctx.ui.notify("Hop limit reached. Cannot broadcast.", "error");
+					return;
+				}
+
+				try {
+					const body: any = {
+						sender_session: identity!.session_id,
+						prompt: "__SYSTEM__:NEW_SESSION",
+						targets: peers.map(a => a.name),
+						hops,
+					};
+					const resp = await api("POST", "/v1/messages", body);
+					ctx.ui.notify(`📡 New-session signal sent to ${peers.length} peer(s): ${peerNames}`, "success");
+				} catch (err: any) {
+					ctx.ui.notify(`📡 Failed to broadcast: ${err?.message ?? String(err)}`, "error");
+				}
 			} else {
 				ctx.ui.notify(
 					"📡 peerstack hub commands:\n" +
 					"  /hub list       Show connected agents\n" +
 					"  /hub status     Show your connection info\n" +
+					"  /hub new        Broadcast new-session signal to all peers\n" +
 					"\n" +
 					"Or ask the agent to use: hub_list, hub_send, hub_await, hub_capabilities, hub_subscribe, hub_status",
 					"info"
