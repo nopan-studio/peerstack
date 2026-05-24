@@ -9,12 +9,12 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const AGENTS_DIR = path.join(ROOT, "agents");
 const REG_ROOT = path.join(process.env.HOME ?? "~", ".pi", "peerstack");
-const SESSION_NAME = "peerstack-team";
+const BASE_SESSION_NAME = "peerstack-team";
 const TMP_DIR = path.join(ROOT, ".pi");
 
 // ── Ensure tmp dir exists ──────────────────────────────────────
@@ -52,12 +52,15 @@ function sleep(ms: number): Promise<void> {
 function tmux(args: string[]): void {
 	const r = spawnSync("tmux", args, { stdio: "pipe" });
 	if (r.status !== 0 && r.status !== null) {
-		// tmux kill-session exits non-zero if session doesn't exist — that's ok
 		const cmd = args.join(" ");
-		if (!(args[0] === "kill-session" && r.status === 1)) {
-			console.error(`tmux ${cmd} exited with status ${r.status}`);
-		}
+		if (args[0] === "kill-session" && r.status === 1) return;
+		console.error(`tmux ${cmd} exited with status ${r.status}`);
 	}
+}
+
+function isTmuxServerRunning(): boolean {
+	const r = spawnSync("tmux", ["info"], { stdio: "pipe" });
+	return r.status === 0;
 }
 
 // ── Hub readiness check ───────────────────────────────────────
@@ -84,19 +87,32 @@ async function waitForHub(maxWaitMs = 30000): Promise<{ local_url: string; token
 // ── Main ──────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-	// 1. Silently kill existing session (non-zero exit if it doesn't exist is fine)
-	tmux(["kill-session", "-t", SESSION_NAME]);
+	const serverRunning = isTmuxServerRunning();
+	const inTmux = !!process.env.TMUX;
+	const SESSION_NAME = BASE_SESSION_NAME;
 
-	// 2. Start hub in window 0
+	// Kill existing session for clean restart
+	spawnSync("tmux", ["kill-session", "-t", BASE_SESSION_NAME], { stdio: "pipe" });
+
+	// 1. Start hub in window 0
 	console.log(`peerstack: starting hub in tmux session "${SESSION_NAME}"...`);
 	tmux([
 		"new-session", "-d",
 		"-s", SESSION_NAME,
 		"-n", "hub",
-		"bun hub/server.ts",
+		"bun", "hub/server.ts",
 	]);
 
-	// 3. Wait for hub to be ready
+	// Cleanup partial session if interrupted mid-flight
+	const cleanup = () => {
+		console.log("\npeerstack: interrupted — killing session...");
+		tmux(["kill-session", "-t", SESSION_NAME]);
+		process.exit(1);
+	};
+	process.on("SIGINT", cleanup);
+	process.on("SIGTERM", cleanup);
+
+	// 2. Wait for hub to be ready
 	console.log("peerstack: waiting for hub...");
 	let hubInfo: { local_url: string; token: string };
 	try {
@@ -104,10 +120,11 @@ async function main(): Promise<void> {
 		console.log(`peerstack: hub ready at ${hubInfo.local_url}`);
 	} catch (e: any) {
 		console.error(e.message);
+		tmux(["kill-session", "-t", SESSION_NAME]);
 		process.exit(1);
 	}
 
-	// 4. Discover agent files
+	// 3. Discover agent files
 	const agentFiles = fs
 		.readdirSync(AGENTS_DIR)
 		.filter(f => f.endsWith(".md"))
@@ -115,14 +132,15 @@ async function main(): Promise<void> {
 
 	if (agentFiles.length === 0) {
 		console.error("No agent definitions found in agents/");
+		tmux(["kill-session", "-t", SESSION_NAME]);
 		process.exit(1);
 	}
 
-	// 5. Spawn agents
+	// 4. Build agent commands
 	const hubTools = "hub_list,hub_send,hub_get,hub_await,hub_status";
+	const agents: { name: string; cmd: string }[] = [];
 
-	for (let i = 0; i < agentFiles.length; i++) {
-		const file = agentFiles[i];
+	for (const file of agentFiles) {
 		const filePath = path.join(AGENTS_DIR, file);
 		const fields = parseAgentMd(filePath);
 
@@ -137,11 +155,9 @@ async function main(): Promise<void> {
 		const color = fields.color || "#36F9F6";
 		const systemPrompt = fields._system_prompt || "";
 
-		// Write system prompt to temp file
 		const tmpFile = path.join(TMP_DIR, `.spawn-tmp-${agentName}.md`);
 		fs.writeFileSync(tmpFile, systemPrompt);
 
-		// Build pi command
 		const allTools = tools + "," + hubTools;
 		const piArgs = [
 			"-e", path.join(ROOT, "extensions", "agent.ts"),
@@ -154,36 +170,41 @@ async function main(): Promise<void> {
 		];
 
 		const cmdStr = `pi ${piArgs.map(a => a.includes(" ") ? `"${a}"` : a).join(" ")}`;
+		agents.push({ name: agentName, cmd: cmdStr });
+	}
 
-		console.log(`peerstack: spawning "${agentName}" → ${model} (tools: ${tools})`);
+	if (agents.length === 0) {
+		console.error("No valid agents found.");
+		tmux(["kill-session", "-t", SESSION_NAME]);
+		process.exit(1);
+	}
 
-		// Create new tmux window
+	// 5. Create a new window for each agent
+	console.log(`peerstack: spawning ${agents.length} agent(s) in separate windows...`);
+
+	for (const agent of agents) {
+		console.log(`peerstack: spawning "${agent.name}"`);
 		tmux([
 			"new-window",
 			"-t", SESSION_NAME,
-			"-n", agentName,
-			cmdStr,
+			"-n", agent.name,
+			agent.cmd,
 		]);
-
-		// Small delay between spawns
-		if (i < agentFiles.length - 1) {
-			await sleep(500);
-		}
+		await sleep(500);
 	}
 
-	// 6. Done
+	// 6. Auto-attach or print instructions
 	console.log("");
-	console.log(`tmux session ready. Attach with: tmux attach -t ${SESSION_NAME}`);
-
-	// 7. Cleanup on signal
-	const cleanup = () => {
-		console.log("\npeerstack: shutting down tmux session...");
-		tmux(["kill-session", "-t", SESSION_NAME]);
-		process.exit(0);
-	};
-
-	process.on("SIGINT", cleanup);
-	process.on("SIGTERM", cleanup);
+	if (!serverRunning && !inTmux) {
+		console.log(`peerstack: tmux was not running — attaching to ${SESSION_NAME}...`);
+		execFileSync("tmux", ["attach", "-t", SESSION_NAME], { stdio: "inherit" });
+	} else if (inTmux) {
+		console.log(`peerstack: created new session "${SESSION_NAME}".`);
+		console.log(`          Switch with: tmux switch-client -t ${SESSION_NAME}`);
+	} else {
+		console.log(`peerstack: created new session "${SESSION_NAME}".`);
+		console.log(`          Attach with: tmux attach -t ${SESSION_NAME}`);
+	}
 }
 
 main().catch(e => {
