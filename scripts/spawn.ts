@@ -4,12 +4,13 @@
  *
  * Usage:
  *   bun scripts/spawn.ts planner
+ *   bun scripts/spawn.ts builder ./my-project
  *   bun scripts/spawn.ts builder --model google/gemini-3-flash-preview
- *   bun scripts/spawn.ts reviewer --tools "read,bash"
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import { spawn } from "node:child_process";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -39,7 +40,7 @@ function parseAgentMd(filePath: string): Record<string, string> | null {
 const args = process.argv.slice(2);
 const agentName = args[0];
 if (!agentName) {
-	console.error("Usage: bun scripts/spawn.ts <agent-name> [--model <model>] [--tools <tools>]");
+	console.error("Usage: bun scripts/spawn.ts <agent-name> [project-dir] [--model <model>] [--tools <tools>] [--project <dir>]");
 	console.error("Agents:");
 	for (const f of fs.readdirSync(AGENTS_DIR).filter(f => f.endsWith(".md"))) {
 		const name = f.replace(/\.md$/, "");
@@ -73,17 +74,29 @@ const color = fields.color || "#36F9F6";
 const name = fields.name || agentName;
 const purpose = fields.description || "";
 const systemPrompt = fields._system_prompt || "";
+let projectDir = process.cwd();
 
-for (let i = 1; i < args.length; i++) {
+let flagStart = 1;
+if (args[1] && !args[1].startsWith("-")) {
+	projectDir = path.resolve(args[1]);
+	flagStart = 2;
+}
+
+for (let i = flagStart; i < args.length; i++) {
 	if (args[i] === "--model" && i + 1 < args.length) { model = args[++i]; }
-	if (args[i] === "--tools" && i + 1 < args.length) { tools = args[++i]; }
-	if (args[i] === "--color" && i + 1 < args.length) { i++; } // ignored, use frontmatter
+	else if (args[i] === "--tools" && i + 1 < args.length) { tools = args[++i]; }
+	else if (args[i] === "--color" && i + 1 < args.length) { i++; } // ignored, use frontmatter
+	else if (args[i] === "--project" && i + 1 < args.length) { projectDir = path.resolve(args[++i]); }
+}
+
+if (!fs.existsSync(projectDir)) {
+	console.error(`Project directory does not exist: ${projectDir}`);
+	process.exit(1);
 }
 
 // ── Write system prompt to temp file ────────────────────────────
 
-const tmpFile = path.join(ROOT, ".pi", ".spawn-tmp.md");
-fs.mkdirSync(path.dirname(tmpFile), { recursive: true });
+const tmpFile = path.join(os.tmpdir(), `.peerstack-spawn-${Date.now()}.md`);
 fs.writeFileSync(tmpFile, systemPrompt);
 
 // ── Build pi command ────────────────────────────────────────────
@@ -107,6 +120,7 @@ if (color) { piArgs.push("--color", color); }
 
 // Start message
 console.log(`peerstack: spawning "${name}" → ${model} (tools: ${tools})`);
+console.log(`  cwd: ${projectDir}`);
 console.log(`  pi ${piArgs.join(" ")}`);
 console.log("");
 
@@ -115,6 +129,7 @@ console.log("");
 const child = spawn("pi", piArgs, {
 	stdio: "inherit",
 	env: { ...process.env },
+	cwd: projectDir,
 	detached: false,
 });
 

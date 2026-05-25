@@ -23,7 +23,7 @@ import * as crypto from "node:crypto";
 
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-const REG_ROOT = path.join(os.homedir(), ".pi", "peerstack");
+const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "peerstack");
 const ENV_SERVER_URL = process.env.PEERSTACK_SERVER_URL;
 const ENV_AUTH_TOKEN = process.env.PEERSTACK_AUTH_TOKEN;
 const MAX_HOPS = Number(process.env.PEERSTACK_MAX_HOPS) || 5;
@@ -91,7 +91,7 @@ function nowIso(): string { return new Date().toISOString(); }
 interface ServerJson { local_url: string; token?: string; }
 
 function readServerJson(): ServerJson | null {
-	const p = path.join(REG_ROOT, "server.json");
+	const p = path.join(CONFIG_DIR, "server.json");
 	try { if (!fs.existsSync(p)) return null; return JSON.parse(fs.readFileSync(p, "utf-8")) as ServerJson; } catch { return null; }
 }
 

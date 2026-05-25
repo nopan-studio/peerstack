@@ -10,13 +10,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
-const TEST_PORT = 52999;
+const TEST_PORT = 52750;
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 
 let hubProcess: ReturnType<typeof Bun.spawn> | null = null;
 let authToken = "";
 
-const REG_ROOT = path.join(os.homedir(), ".pi", "peerstack");
+const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "peerstack");
 
 function randomSessionId(): string {
   return `test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -105,7 +105,7 @@ async function deleteAgent(sessionId: string): Promise<void> {
 }
 
 beforeAll(async () => {
-  const serverJsonPath = path.join(REG_ROOT, "server.json");
+  const serverJsonPath = path.join(CONFIG_DIR, "server.json");
   try { fs.unlinkSync(serverJsonPath); } catch { /* ignore */ }
 
   hubProcess = Bun.spawn(["bun", "hub/server.ts"], {

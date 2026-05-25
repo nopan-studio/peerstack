@@ -22,7 +22,7 @@ tmux session: peerstack-team
 
 1. **Kill existing session** — `tmux kill-session -t peerstack-team` if it exists (clean restart)
 2. **Start hub** — new detached tmux session "peerstack-team", window 0, run hub
-3. **Wait for hub** — poll `~/.pi/peerstack/server.json` + `/health` endpoint until ready (max 30s)
+3. **Wait for hub** — poll `~/.config/peerstack/server.json` + `/health` endpoint until ready (max 30s)
 4. **Spawn agents sequentially** — for each agent in `agents/*.md`:
    - Parse frontmatter (name, model, color, tools, system prompt)
    - Write system prompt to temp file
@@ -50,7 +50,7 @@ async function waitForHub(maxWaitMs = 30000): Promise<{ url: string; token: stri
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     try {
-      const sj = JSON.parse(fs.readFileSync(path.join(REG_ROOT, "server.json"), "utf-8"));
+      const sj = JSON.parse(fs.readFileSync(path.join(CONFIG_DIR, "server.json"), "utf-8"));
       const resp = await fetch(sj.local_url + "/health", { headers: { Authorization: `Bearer ${sj.token}` } });
       if (resp.ok) return sj;
     } catch {}

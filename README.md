@@ -157,9 +157,9 @@ Broadcasts a new-session signal to all peers. Each agent gets a notification: "R
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PEERSTACK_HOST` | `127.0.0.1` | Hub bind address |
-| `PEERSTACK_PORT` | `52965` | Hub port (`0` = OS-assigned) |
+| `PEERSTACK_PORT` | `52525` | Hub port (`0` = OS-assigned) |
 | `PEERSTACK_AUTH_TOKEN` | *(auto)* | Bearer token for `/v1/*` routes |
-| `PEERSTACK_SERVER_URL` | *(auto from `~/.pi/peerstack/server.json`)* | Hub URL override for agents (use for remote/LAN) |
+| `PEERSTACK_SERVER_URL` | *(auto from `~/.config/peerstack/server.json`)* | Hub URL override for agents (use for remote/LAN) |
 | `PEERSTACK_MAX_HOPS` | `5` | Circular-routing prevention |
 | `PEERSTACK_MESSAGE_TTL_MS` | `1800000` | Message expiry (30 min) |
 | `PEERSTACK_MAX_INBOX` | `100` | Per-agent inbox depth limit |

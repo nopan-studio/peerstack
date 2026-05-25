@@ -21,7 +21,7 @@ import { spawn } from "node:child_process";
 const TEST_PORT = 52977;
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 const ROOT = path.resolve(import.meta.dirname, "..");
-const REG_ROOT = path.join(os.homedir(), ".pi", "peerstack");
+const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "peerstack");
 
 let authToken = "";
 let hubPid: number | null = null;
@@ -63,7 +63,7 @@ async function jsonApi(method: string, path: string, body?: unknown): Promise<an
 async function waitForHub(maxAttempts = 50) {
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      const sjPath = path.join(REG_ROOT, "server.json");
+      const sjPath = path.join(CONFIG_DIR, "server.json");
       if (fs.existsSync(sjPath)) {
         const sj = JSON.parse(fs.readFileSync(sjPath, "utf-8")) as { token: string; local_url: string };
         authToken = sj.token;
@@ -93,7 +93,7 @@ async function main() {
   process.on("SIGTERM", cleanup);
 
   // Clean previous state
-  const serverJsonPath = path.join(REG_ROOT, "server.json");
+  const serverJsonPath = path.join(CONFIG_DIR, "server.json");
   try { fs.unlinkSync(serverJsonPath); } catch {}
 
   // Kill any leftover tmux sessions
@@ -139,7 +139,7 @@ async function main() {
   log("STEP2", `Command: ${scoutCmd.join(" ")}`);
   
   // Create temp file for system prompt
-  const tmpDir = path.join(ROOT, ".pi");
+  const tmpDir = path.join(os.tmpdir(), "peerstack");
   fs.mkdirSync(tmpDir, { recursive: true });
   const scoutPromptFile = path.join(tmpDir, "scout-prompt.md");
   fs.writeFileSync(scoutPromptFile, "You are a scout agent. Investigate the codebase quickly and report findings concisely.");

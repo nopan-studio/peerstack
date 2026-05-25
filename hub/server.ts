@@ -7,7 +7,7 @@
  *
  * Usage:
  *   bun hub/server.ts
- *   PEERSTACK_PORT=52965 bun hub/server.ts
+ *   PEERSTACK_PORT=52525 bun hub/server.ts
  */
 
 import * as crypto from "node:crypto";
@@ -21,8 +21,8 @@ import * as readline from "node:readline";
 // ═══════════════════════════════════════════════════════════════════════════
 
 const HOST = process.env.PEERSTACK_HOST ?? "127.0.0.1";
-const PORT = Number(process.env.PEERSTACK_PORT ?? 52965);
-const REG_ROOT = path.join(os.homedir(), ".pi", "peerstack");
+const PORT = Number(process.env.PEERSTACK_PORT ?? 52525);
+const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "peerstack");
 const ENV_TOKEN = process.env.PEERSTACK_AUTH_TOKEN;
 
 const MAX_HOPS = Number(process.env.PEERSTACK_MAX_HOPS ?? 5);
@@ -911,7 +911,7 @@ function main(): void {
 		TOKEN = crypto.randomBytes(32).toString("hex");
 	}
 
-	const dir = path.join(REG_ROOT);
+	const dir = CONFIG_DIR;
 	fs.mkdirSync(dir, { recursive: true });
 
 	const server = Bun.serve({ hostname: HOST, port: PORT, fetch: router, idleTimeout: 0 });
