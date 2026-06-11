@@ -115,7 +115,7 @@ const piArgs = [
 ];
 
 // Pass identity flags to the extension
-if (name) { piArgs.push("--name", name); }
+if (name) { piArgs.push("--agent-name", name); }
 if (color) { piArgs.push("--color", color); }
 
 // Start message

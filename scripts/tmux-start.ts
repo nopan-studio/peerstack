@@ -140,7 +140,7 @@ async function main(): Promise<void> {
 			"-e", path.join(ROOT, "extensions", "minimal.ts"),
 			"--model", model,
 			"--tools", allTools,
-			"--name", agentName,
+			"--agent-name", agentName,
 			"--color", color,
 			"--append-system-prompt", tmpFile,
 		];

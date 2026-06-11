@@ -112,7 +112,7 @@ function resolveAuthToken(): string {
 // ━━ Default export ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export default function (pi: ExtensionAPI) {
-	pi.registerFlag("name", { description: "Agent name", type: "string", default: undefined });
+	pi.registerFlag("agent-name", { description: "Agent name", type: "string", default: undefined });
 	pi.registerFlag("color", { description: "Hex color #RRGGBB", type: "string", default: undefined });
 
 	let identity: { session_id: string; name: string; color: string; cwd: string; model: string } | null = null;
@@ -418,7 +418,7 @@ export default function (pi: ExtensionAPI) {
 		applyExtensionDefaults(import.meta.url, ctx);
 		currentCtx = ctx;
 
-		const name = (pi.getFlag("name") as string) || `agent-${ulid().slice(-6)}`;
+		const name = (pi.getFlag("agent-name") as string) || `agent-${ulid().slice(-6)}`;
 		const color = (pi.getFlag("color") as string) || "#36F9F6";
 		identity = { session_id: ulid(), name, color, cwd: ctx.cwd || process.cwd(), model: ctx.model?.id ?? "unknown" };
 

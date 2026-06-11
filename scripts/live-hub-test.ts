@@ -132,7 +132,7 @@ async function main() {
     "-e", path.join(ROOT, "extensions", "minimal.ts"),
     "--model", "opencode-go/deepseek-v4-flash",
     "--tools", "read,grep,find,ls,hub_list,hub_send,hub_get,hub_await,hub_status",
-    "--name", "scout",
+    "--agent-name", "scout",
     "--color", "#FEDE5D",
     "--append-system-prompt", "You are a scout agent. Investigate the codebase quickly and report findings concisely.",
   ];
@@ -150,7 +150,7 @@ async function main() {
     "-e", path.join(ROOT, "extensions", "minimal.ts"),
     "--model", "opencode-go/deepseek-v4-flash",
     "--tools", "read,grep,find,ls,hub_list,hub_send,hub_get,hub_await,hub_status",
-    "--name", "scout",
+    "--agent-name", "scout",
     "--color", "#FEDE5D",
     "--append-system-prompt", scoutPromptFile,
   ];
@@ -169,7 +169,7 @@ async function main() {
     "-e", path.join(ROOT, "extensions", "minimal.ts"),
     "--model", "opencode-go/deepseek-v4-flash",
     "--tools", "read,grep,find,ls,hub_list,hub_send,hub_get,hub_await,hub_status",
-    "--name", "planner",
+    "--agent-name", "planner",
     "--color", "#36F9F6",
     "--append-system-prompt", plannerPromptFile,
   ];
