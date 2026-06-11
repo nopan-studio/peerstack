@@ -34,6 +34,8 @@ const STALE_SCAN_INTERVAL_MS = 5_000;
 const TTL_SCAN_INTERVAL_MS = 10_000;
 const SSE_KEEPALIVE_MS = 15_000;
 const DASHBOARD_REFRESH_MS = 500;
+const SESSIONS_DIR = path.join(CONFIG_DIR, "sessions");
+const SESSION_SAVE_INTERVAL_MS = 30_000;
 
 const C = {
 	reset: "\x1b[0m",
@@ -102,6 +104,9 @@ const messageLog: LogEntry[] = [];
 const conversationTracker = new Map<string, { from: string; to: string; preview: string; time: number }>();
 const subscriptions = new Map<string, PresenceSubscription>();
 let startupTime = Date.now();
+let sessionFilePath = "";
+let sessionId = "";
+let scrollOffset = 0;
 
 let lastOutput = "";
 
@@ -230,6 +235,55 @@ function shortModel(m: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Session Persistence
+// ═══════════════════════════════════════════════════════════════════════════
+
+function initSession(): void {
+	fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+	sessionId = new Date().toISOString().replace(/[:.]/g, "-");
+	sessionFilePath = path.join(SESSIONS_DIR, `${sessionId}.json`);
+	saveSession();
+}
+
+function saveSession(): void {
+	if (!sessionFilePath) return;
+	const snapshot = {
+		session_id: sessionId,
+		saved_at: Date.now(),
+		startup_time: startupTime,
+		messages: [...messages.values()],
+		conversation_tracker: [...conversationTracker.entries()],
+		message_log: messageLog,
+	};
+	const tmp = sessionFilePath + ".tmp";
+	try {
+		fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2));
+		fs.renameSync(tmp, sessionFilePath);
+	} catch { /* ignore */ }
+}
+
+function loadLatestSession(): void {
+	try {
+		const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith(".json")).sort().reverse();
+		if (files.length === 0) return;
+		const latest = path.join(SESSIONS_DIR, files[0]);
+		const data = JSON.parse(fs.readFileSync(latest, "utf-8"));
+		if (data.messages) {
+			for (const m of data.messages) messages.set(m.msg_id, m);
+		}
+		if (data.conversation_tracker) {
+			for (const [k, v] of data.conversation_tracker) conversationTracker.set(k, v);
+		}
+		if (data.message_log) {
+			for (const entry of data.message_log) messageLog.push(entry);
+			if (messageLog.length > 100) messageLog.splice(0, messageLog.length - 100);
+		}
+		if (data.startup_time) startupTime = data.startup_time;
+		console.log("peerstack hub: restored session from " + files[0]);
+	} catch { /* ignore */ }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Terminal Dashboard
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -315,7 +369,11 @@ function buildDashboard(cols: number): string[] {
 
 	lines.push("");
 	lines.push(C.dim + "─".repeat(cols) + C.reset);
-	lines.push(C.dim + "  q quit  |  " + agentList.length + " agent" + (agentList.length !== 1 ? "s" : "") + C.reset);
+	let footer = C.dim + "  q quit  |  ↑↓ scroll  |  " + agentList.length + " agent" + (agentList.length !== 1 ? "s" : "") + C.reset;
+	if (scrollOffset > 0) {
+		footer += C.dim + "  ↑" + scrollOffset + C.reset;
+	}
+	lines.push(footer);
 	return lines;
 }
 
@@ -324,15 +382,19 @@ let lastBuiltKey = "";
 function dashboardRender(): void {
 	const cols = process.stdout.columns ?? 80;
 	const rows = process.stdout.rows ?? 24;
-	const stateKey = agents.size + "|" + messageLog.length + "|" + conversationTracker.size + "|" +
+	const stateKey = agents.size + "|" + messageLog.length + "|" + conversationTracker.size + "|" + scrollOffset + "|" +
 		[...agents.values()].map(a => Math.round(a.context_used_pct) + "|" + a.queue_depth + "|" + a.status).join(",");
 	if (stateKey === lastBuiltKey) return;
 	lastBuiltKey = stateKey;
-	const lines = buildDashboard(cols);
-	const output = lines.slice(0, rows - 1).join("\n");
+	const allLines = buildDashboard(cols);
+	const maxVisible = rows - 1;
+	const maxScroll = Math.max(0, allLines.length - maxVisible);
+	scrollOffset = Math.min(scrollOffset, maxScroll);
+	const visibleLines = allLines.slice(scrollOffset, scrollOffset + maxVisible);
+	const output = visibleLines.join("\n");
 	if (output === lastOutput) return;
 	lastOutput = output;
-	process.stdout.write("\x1b[H" + output + "\n");
+	process.stdout.write("\x1b[H\x1b[J" + output + "\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -931,6 +993,10 @@ function main(): void {
 		for (const [, w] of streams) { try { w.enqueue(frame); } catch { /* dead */ } }
 	}, SSE_KEEPALIVE_MS);
 
+	loadLatestSession();
+	initSession();
+	const sessionSaveTimer = setInterval(saveSession, SESSION_SAVE_INTERVAL_MS);
+
 	dashboardInit();
 	process.stdout.write("peerstack hub: listening on " + localUrl + "\n");
 
@@ -950,20 +1016,29 @@ function main(): void {
 		process.stdin.setRawMode!(true);
 		process.stdin.on("keypress", (_str, key) => {
 			if (key.name === "q" || (key.ctrl && key.name === "c")) {
-				cleanShutdown(server, staleTimer, ttlTimer, keepaliveTimer, serverJsonPath);
+				cleanShutdown(server, staleTimer, ttlTimer, keepaliveTimer, sessionSaveTimer, serverJsonPath);
+				return;
 			}
+			if (key.name === "up") { scrollOffset = Math.max(0, scrollOffset - 1); lastBuiltKey = ""; dashboardRender(); }
+			if (key.name === "down") { scrollOffset = Math.max(0, scrollOffset + 1); lastBuiltKey = ""; dashboardRender(); }
+			if (key.name === "pageup") { scrollOffset = Math.max(0, scrollOffset - 5); lastBuiltKey = ""; dashboardRender(); }
+			if (key.name === "pagedown") { scrollOffset = Math.max(0, scrollOffset + 5); lastBuiltKey = ""; dashboardRender(); }
+			if (key.name === "home") { scrollOffset = 0; lastBuiltKey = ""; dashboardRender(); }
+			if (key.name === "end") { scrollOffset = Math.max(0, 999999); lastBuiltKey = ""; dashboardRender(); }
 		});
 	}
 
-	process.on("SIGINT", () => { cleanShutdown(server, staleTimer, ttlTimer, keepaliveTimer, serverJsonPath); });
-	process.on("SIGTERM", () => { cleanShutdown(server, staleTimer, ttlTimer, keepaliveTimer, serverJsonPath); });
+	process.on("SIGINT", () => { cleanShutdown(server, staleTimer, ttlTimer, keepaliveTimer, sessionSaveTimer, serverJsonPath); });
+	process.on("SIGTERM", () => { cleanShutdown(server, staleTimer, ttlTimer, keepaliveTimer, sessionSaveTimer, serverJsonPath); });
 }
 
-function cleanShutdown(server: any, staleTimer: any, ttlTimer: any, keepaliveTimer: any, serverJsonPath: string): void {
+function cleanShutdown(server: any, staleTimer: any, ttlTimer: any, keepaliveTimer: any, sessionSaveTimer: any, serverJsonPath: string): void {
 	dashboardDone();
 	clearInterval(staleTimer);
 	clearInterval(ttlTimer);
 	clearInterval(keepaliveTimer);
+	clearInterval(sessionSaveTimer);
+	saveSession();
 	try { fs.unlinkSync(serverJsonPath); } catch { /* ignore */ }
 	try { server.stop?.(true); } catch { /* ignore */ }
 	console.log("peerstack hub: shutdown");
