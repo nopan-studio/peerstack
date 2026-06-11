@@ -82,7 +82,7 @@ The actual `scripts/tmux-start.ts` takes a simpler, pane-based approach:
 
 ### Key differences from the original plan
 
-1. **No hub management** — The script does **not** start the hub. It checks whether the hub is already running (via `hubIsUp()`) and warns if it isn't, but assumes you've started it manually (`./stak hub` in another pane).
+1. **No hub management** — The script does **not** start the hub. It checks whether the hub is already running (via `hubIsUp()`) and warns if it isn't, but assumes you've started it manually (`./peerstack hub` in another pane).
 
 2. **Panes, not windows** — Instead of creating a dedicated `peerstack-team` session with named windows, the script uses `tmux split-window` to create panes in the **current** tmux window, then tiles them with `tmux select-layout tiled`.
 
@@ -97,10 +97,10 @@ The actual `scripts/tmux-start.ts` takes a simpler, pane-based approach:
 tmux new -s peerstack
 
 # 2. Start the hub in one pane
-./stak hub
+./peerstack hub
 
 # 3. In another pane, spawn all agents
-./stak team [project-dir]
+./peerstack team [project-dir]
 ```
 
 ### What it does
@@ -119,12 +119,12 @@ tmux new -s peerstack
 | File | Action |
 |------|--------|
 | `scripts/tmux-start.ts` | The pane-based implementation |
-| `stak` | CLI entry point (`./stak team` invokes the script) |
+| `peerstack` | CLI entry point (`./peerstack team` invokes the script) |
 | `README.md` | Documents usage |
 
 ### Acceptance Criteria (actual)
-- [x] Running `./stak team` inside a tmux session spawns all agents as panes
+- [x] Running `./peerstack team` inside a tmux session spawns all agents as panes
 - [x] Hub is assumed to be running (warns if not detected)
 - [x] All agents appear in hub dashboard after spawn
-- [x] `./stak team` is a valid CLI command
+- [x] `./peerstack team` is a valid CLI command
 - [x] README documents the updated command

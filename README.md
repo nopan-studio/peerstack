@@ -57,7 +57,7 @@ cp .env.sample .env
 # → Add at least one API key (OpenAI, Anthropic, Gemini, or OpenRouter)
 
 # 3. Make CLI executable
-chmod +x stak
+chmod +x peerstack
 ```
 
 ---
@@ -67,7 +67,7 @@ chmod +x stak
 ### 1. Start the hub
 
 ```bash
-./stak hub
+./peerstack hub
 # or
 bun hub/server.ts
 ```
@@ -79,21 +79,21 @@ The hub prints its URL and auto-generates an auth token (localhost only). Set `P
 In separate terminals:
 
 ```bash
-./stak spawn dax
-./stak spawn kael
-./stak spawn lyra
+./peerstack spawn dax
+./peerstack spawn kael
+./peerstack spawn lyra
 ```
 
 Or list available agents:
 
 ```bash
-./stak list
+./peerstack list
 ```
 
 Agents are defined in `agents/<name>.md` with YAML frontmatter (`name`, `model`, `color`, `description`, `tools`). You can override on the fly:
 
 ```bash
-./stak spawn dax --model google/gemini-3-flash-preview
+./peerstack spawn dax --model google/gemini-3-flash-preview
 ```
 
 ### One-command team start
@@ -103,14 +103,14 @@ Agents are defined in `agents/<name>.md` with YAML frontmatter (`name`, `model`,
 tmux new -s peerstack
 
 # 2. Start the hub in one pane
-./stak hub
+./peerstack hub
 
 # 3. In another pane, spawn all agents
-./stak team
+./peerstack team
 ```
 
 Spawns all agents from `agents/*.md` as panes in the **current** tmux window (tiled layout).
-The hub must already be running — `stak team` warns if it isn't.
+The hub must already be running — `peerstack team` warns if it isn't.
 
 ### 3. Let agents talk
 
@@ -132,7 +132,7 @@ Example inside an agent session:
 ```
 >>> MESSAGE FROM KAEL [ORCHESTRATOR] <<<
 
-Please review the auth module.
+Please explore the auth module structure and report findings.
 
 (Your response will be automatically sent back to kael.)
 ```
@@ -140,7 +140,7 @@ Please review the auth module.
 Or an agent can actively delegate:
 
 ```
-Use hub_send to ask dax to generate the API client, then hub_await for the result.
+Use hub_send to ask lyra to explore the codebase, dax to implement features, venn to review changes, and remy to commit the results.
 ```
 
 Or broadcast to all peers at once:
@@ -222,10 +222,8 @@ bun scripts/live-hub-test.ts
 │   ├── dax.md                 # Agent definition (frontmatter + system prompt)
 │   ├── kael.md
 │   ├── lyra.md
-│   ├── nox.md
-│   ├── sova.md
 │   ├── venn.md
-│   └── zell.md
+│   └── remy.md
 ├── scripts/
 │   ├── spawn.ts               # Launch agent from .md definition
 │   └── live-hub-test.ts       # End-to-end live test
@@ -233,7 +231,7 @@ bun scripts/live-hub-test.ts
 │   └── hub.test.ts            # Integration tests
 ├── docs/
 │   └── peerstack-hub-improvements.md  # Phase 2–4 roadmap
-├── stak                       # CLI entry point
+├── peerstack                  # CLI entry point
 ├── .env.sample
 └── package.json
 ```

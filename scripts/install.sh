@@ -26,7 +26,7 @@ cat > "$BIN_DIR/peerstack" <<EOF
 export PEERSTACK_ROOT="$INSTALL_DIR"
 export PEERSTACK_CONFIG="$CONFIG_DIR"
 export PEERSTACK_CACHE="$CACHE_DIR"
-exec "\$PEERSTACK_ROOT/stak" "\$@"
+exec "\$PEERSTACK_ROOT/peerstack" "\$@"
 EOF
 chmod +x "$BIN_DIR/peerstack"
 

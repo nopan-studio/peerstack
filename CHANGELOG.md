@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `scripts/tmux-start.ts` — spawn all agents as tmux panes in the current window.
   - `scripts/live-hub-test.ts` — end-to-end live test with real pi agents in tmux.
   - `scripts/install.sh` — install peerstack to `~/.local/share/peerstack` with wrapper script.
-  - `stak` CLI entrypoint with `hub`, `spawn`, `team`, and `list` commands.
+  - `peerstack` CLI entrypoint with `hub`, `spawn`, `team`, and `list` commands.
   - Frontmatter parser supporting `name`, `model`, `color`, `tools`, `description`, and system prompt body.
   - CLI overrides for `--model`, `--tools`, and `--project`.
 
@@ -50,10 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Dax [Builder] — implementation and feature execution.
   - Kael [Orchestrator] — task decomposition, delegation, and synthesis.
   - Lyra [Scout] — fast codebase recon and structure mapping.
-  - Nox [Debugger] — bug investigation and targeted fixes.
-  - Sova [Planner] — architecture analysis and step-by-step planning.
-  - Venn [Reviewer] — code review, security audit, and quality enforcement.
-  - Zell [Tester] — test authoring, execution, and coverage analysis.
+  - Venn [QA] — code review, debugging, testing, and quality enforcement.
+  - Remy [Git] — git operations and GitHub CLI workflows.
 
 - **Testing**
   - `tests/hub.test.ts` — Bun integration tests covering:
@@ -78,9 +76,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **refactor: rename `--name` to `--agent-name`** — updated CLI flag for agent identity across `extensions/agent.ts`, `scripts/spawn.ts`, `scripts/tmux-start.ts`, and `scripts/live-hub-test.ts`.
-- **docs: update README, stak CLI examples, and project structure** — replaced old agent names (`planner`, `builder`, `reviewer`, `scout`) with current agent names (`dax`, `kael`, `lyra`, `nox`, `sova`, `venn`, `zell`).
-- **docs: update `stak team` description** — corrected to reflect pane-based implementation (requires existing tmux session, hub started separately).
+- **docs: update README, CLI examples, and project structure** — replaced old agent names (`planner`, `builder`, `reviewer`, `scout`) with current agent names (`dax`, `kael`, `lyra`, `venn`, `remy`).
+- **docs: update `peerstack team` description** — corrected to reflect pane-based implementation (requires existing tmux session, hub started separately).
 - **docs: update `docs/tmux-team-start-plan.md`** — added current implementation section documenting pane-based approach vs. original window-based plan.
+
+### Removed
+
+- Removed agents `nox`, `sova`, `zell`.
+- Removed `agents-bk/` backup directory.
+- Renamed CLI entrypoint from `stak` to `peerstack`.
+
+### Changed (continued)
+
+- Updated agent definitions: `dax`, `kael`, `lyra`, `venn`, `remy`.
 
 ### Fixed
 

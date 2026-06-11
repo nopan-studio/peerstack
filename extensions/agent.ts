@@ -99,7 +99,7 @@ function resolveServerUrl(): string {
 	if (ENV_SERVER_URL) return ENV_SERVER_URL.replace(/\/+$/, "");
 	const sj = readServerJson();
 	if (sj?.local_url) return sj.local_url.replace(/\/+$/, "");
-	throw new Error("no peerstack server URL. Start the hub first: stak hub");
+	throw new Error("no peerstack server URL. Start the hub first: peerstack hub");
 }
 
 function resolveAuthToken(): string {
@@ -788,7 +788,7 @@ export default function (pi: ExtensionAPI) {
 				if (lastFetchError) {
 					ctx.ui.notify(`📡 Hub error: ${lastFetchError}\n  URL: ${serverUrl ?? "?"}\n  Token: ${authToken ? authToken.slice(0, 8) + "..." : "none"}`, "error");
 				} else if (agents.length === 0) {
-					ctx.ui.notify("📡 No agents on hub.\n  Start agents: stak spawn <name>", "info");
+					ctx.ui.notify("📡 No agents on hub.\n  Start agents: peerstack spawn <name>", "info");
 				} else {
 					const lines = agents.map(a => `${a.status === "online" ? "●" : a.status === "stale" ? "~" : "✗"} ${a.name}#${shortId(a.session_id)}${isSelf(a) ? " (you)" : ""} (${abbreviateModel(a.model)}) [${a.availability || "?"}] ${Math.round(a.context_used_pct)}% ${a.queue_depth > 0 ? "⚡" : ""}${a.groups?.length ? ` ${a.groups.join(' ')}` : ""}`).join("\n");
 					ctx.ui.notify(`📡 ${agents.length} agent(s):\n${lines}`, "info");

@@ -2,13 +2,13 @@
 /**
  * tmux-start.ts — Launch all agents from agents/*.md in the CURRENT tmux window panes
  *
- * Assumes hub is already running (start it manually with: ./stak hub)
+ * Assumes hub is already running (start it manually with: ./peerstack hub)
  *
  * Usage:
  *   bun scripts/tmux-start.ts
  *   bun scripts/tmux-start.ts ./my-project
- *   ./stak team
- *   ./stak team ./my-project
+ *   ./peerstack team
+ *   ./peerstack team ./my-project
  */
 
 import * as fs from "node:fs";
@@ -78,13 +78,13 @@ async function main(): Promise<void> {
 
 	if (!inTmux) {
 		console.error("peerstack: error — not inside a tmux session.");
-		console.error("  Start tmux first, then run: ./stak team");
+		console.error("  Start tmux first, then run: ./peerstack team");
 		process.exit(1);
 	}
 
 	const hubRunning = await hubIsUp();
 	if (!hubRunning) {
-		console.log("peerstack: warning — hub not detected. Start it first: ./stak hub");
+		console.log("peerstack: warning — hub not detected. Start it first: ./peerstack hub");
 	}
 
 	// Parse optional project dir
