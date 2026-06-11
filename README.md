@@ -79,9 +79,9 @@ The hub prints its URL and auto-generates an auth token (localhost only). Set `P
 In separate terminals:
 
 ```bash
-./stak spawn planner
-./stak spawn builder
-./stak spawn reviewer
+./stak spawn dax
+./stak spawn kael
+./stak spawn lyra
 ```
 
 Or list available agents:
@@ -93,17 +93,24 @@ Or list available agents:
 Agents are defined in `agents/<name>.md` with YAML frontmatter (`name`, `model`, `color`, `description`, `tools`). You can override on the fly:
 
 ```bash
-./stak spawn builder --model google/gemini-3-flash-preview
+./stak spawn dax --model google/gemini-3-flash-preview
 ```
 
 ### One-command team start
 
 ```bash
+# 1. Create/attach a tmux session
+tmux new -s peerstack
+
+# 2. Start the hub in one pane
+./stak hub
+
+# 3. In another pane, spawn all agents
 ./stak team
 ```
 
-Spawns the hub + all agents from `agents/*.md` in a tmux session (`peerstack-team`).
-Attach with: `tmux attach -t peerstack-team`
+Spawns all agents from `agents/*.md` as panes in the **current** tmux window (tiled layout).
+The hub must already be running — `stak team` warns if it isn't.
 
 ### 3. Let agents talk
 
@@ -123,17 +130,17 @@ Agents can use these tools automatically:
 Example inside an agent session:
 
 ```
->>> MESSAGE FROM PLANNER <<<
+>>> MESSAGE FROM KAEL [ORCHESTRATOR] <<<
 
 Please review the auth module.
 
-(Your response will be automatically sent back to planner.)
+(Your response will be automatically sent back to kael.)
 ```
 
 Or an agent can actively delegate:
 
 ```
-Use hub_send to ask builder to generate the API client, then hub_await for the result.
+Use hub_send to ask dax to generate the API client, then hub_await for the result.
 ```
 
 Or broadcast to all peers at once:
@@ -212,10 +219,13 @@ bun scripts/live-hub-test.ts
 │   ├── minimal.ts             # Compact footer (model + context bar)
 │   └── themeMap.ts            # Per-extension theme defaults
 ├── agents/
-│   ├── builder.md             # Agent definition (frontmatter + system prompt)
-│   ├── planner.md
-│   ├── reviewer.md
-│   └── scout.md
+│   ├── dax.md                 # Agent definition (frontmatter + system prompt)
+│   ├── kael.md
+│   ├── lyra.md
+│   ├── nox.md
+│   ├── sova.md
+│   ├── venn.md
+│   └── zell.md
 ├── scripts/
 │   ├── spawn.ts               # Launch agent from .md definition
 │   └── live-hub-test.ts       # End-to-end live test

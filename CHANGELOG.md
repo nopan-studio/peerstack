@@ -77,7 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- N/A — initial functional release.
+- **refactor: rename `--name` to `--agent-name`** — updated CLI flag for agent identity across `extensions/agent.ts`, `scripts/spawn.ts`, `scripts/tmux-start.ts`, and `scripts/live-hub-test.ts`.
+- **docs: update README, stak CLI examples, and project structure** — replaced old agent names (`planner`, `builder`, `reviewer`, `scout`) with current agent names (`dax`, `kael`, `lyra`, `nox`, `sova`, `venn`, `zell`).
+- **docs: update `stak team` description** — corrected to reflect pane-based implementation (requires existing tmux session, hub started separately).
+- **docs: update `docs/tmux-team-start-plan.md`** — added current implementation section documenting pane-based approach vs. original window-based plan.
 
 ### Fixed
 

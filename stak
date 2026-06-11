@@ -52,10 +52,10 @@ case "${1:-}" in
     echo ""
     echo "Examples:"
     echo "  peerstack hub"
-    echo "  peerstack spawn planner"
-    echo "  peerstack spawn builder ./my-project"
+    echo "  peerstack spawn dax"
+    echo "  peerstack spawn dax ./my-project"
     echo "  peerstack team ./my-project"
-    echo "  peerstack spawn builder --model google/gemini-3-flash-preview"
+    echo "  peerstack spawn dax --model google/gemini-3-flash-preview"
     exit 1
     ;;
 esac
